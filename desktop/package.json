@@ -46,7 +46,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Freebuff2API"
+      "shortcutName": "Freebuff2API",
+      "artifactName": "Freebuff2API-Setup-${version}.${ext}"
     },
     "directories": {
       "output": "dist"
