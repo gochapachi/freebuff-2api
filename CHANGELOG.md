@@ -2,6 +2,50 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.0] - 2026-09-15
+
+### 新增
+
+- **双桶并发信号量落地**（README 宣称的能力补实，`src/semaphore.rs`）：
+  - tokio `Semaphore` 零新依赖；免费 `{槽:1, 并发:3}`、订阅 `{槽:3, 并发:8}`（可配：`concurrency_free_slots/free_multi/sub_slots/sub_multi`，环境变量 `CONCURRENCY_*`）
+  - 接入 `/v1/chat/completions`、`/v1/messages`、web 桥接三路径，**首字节写出前 acquire**；`TierGuard` RAII 自动归还（流式任务结束才释放）
+  - 2s 超时返回 429（`concurrency_busy`），不无限排队；订阅判定保守（账号池任一凭证含套餐特征走订阅桶）
+  - 注：每请求同时占"槽"与"并发"各一，实际并发上限 = 槽位容量（免费 1 / 订阅 3），"并发"桶为上游策略预留维度
+- **Claude 路径补齐重试 + 记账 + 记忆**（`/v1/messages`，此前三缺）：
+  - 请求级重试循环（与 OpenAI 同策略）：失败换号、5xx/限流/网络自动重试、熔断冷却
+  - waiting_room 排队返回 503 + `overloaded_error` 可读消息（不再裸 502）
+  - 非流式成功补 `usage_db.record_ex` + `telemetry.record`；流式补 usage 落库；成功路径补 `memory.observe`
+- **面板现代化**（`src/web.rs`）：
+  - 新增 **对话测试台**（调 `/v1/chat/completions` 流式渲染回复）、**设置页**（监听地址/记忆开关/token_saver/脱敏/技能模式/预算/代理/清理间隔/信号量容量 UI 化写回 config.json）、**关于页**（版本/运行时长/上游/免责声明）
+  - 新增 `GET /api/config` + `POST /api/config/save`：白名单校验 + 类型/合法值检查 + 原子写回；`memory_enabled` 热生效
+  - 视觉品牌化：CSS 分层 token（色板/间距/圆角/阴影/动效）、`prefers-reduced-motion` 尊重、`focus-visible` 焦点环、窄屏导航横向滚动
+  - 大日志 **windowed 虚拟滚动**（只渲染可视区 + 缓冲，>1000 条流畅）
+- **安全加固**：
+  - 全部响应加 `X-Content-Type-Options: nosniff`、`Referrer-Policy: strict-origin-when-cross-origin`；面板页加 CSP `default-src 'self'`
+  - **日志/遥测脱敏**（`src/redact.rs`，`redact_logs` 默认开）：Cookie 值 / Bearer / authorization / sk- 长串在写入日志总线与遥测前替换为 `***`
+  - 跨站 Origin 拦截改为 **403 Forbidden**（CSRF，语义区别于 401）
+- **桌面壳加固**：
+  - 多开保护：`app.requestSingleInstanceLock()`，二次启动激活已有窗口，不重复拉起网关
+  - 托盘「系统体检」改用 hash 跳转（`location.hash='#doctor'`），不再全页刷新
+- **健壮性**：
+  - 端口绑定失败给出明确中文错误（含占用进程排查提示 `netstat -ano | findstr :port`）
+  - `web_threads` 绑定表加容量上限（2000）与 TTL 清理（24h），防文件/内存膨胀
+  - Cookie 判定收窄：`handle_account_balance` 不再用 `%3A` 兜底（防 URL 编码串误判）
+
+### 测试
+
+- 新增 `src/semaphore.rs` 6 项单测（桶独立/超时/RAII 无泄漏/订阅判定）
+- 新增 `src/redact.rs` 6 项单测（Cookie/Bearer/sk- 脱敏、普通文本不误伤）
+- 新增 `tests/router_test.rs` **10 项 Router 级集成测试**（Mock TCP 上游）：chat 非流式/流式、messages 非流式、排队 503、401、跨站 403、healthz、桥接触发、5xx 重试耗尽、401 凭证失效
+- 补充 api 单测（Cookie 判定收窄回归、Claude tool 往返语义）、web_threads 单测（TTL/容量）
+- **测试规模：238 单测 + 8 集成 + 10 路由级集成全绿**；`cargo clippy -- -D warnings` 零警告
+- 新增 `tests/e2e_phase_v0_8.cjs`（26 断言真实网关冒烟：安全头/CSP/配置读写/新 tab/windowed 渲染/脱敏）+ headless Edge 真实浏览器面板验证
+
+### 修复
+
+- `desktop/main.js` 托盘「系统体检」跳转失效（`loadURL('#doctor')` 不触发 hash 路由 → 改 `executeJavaScript` 设 hash）
+- README 版本失真（`Setup 0.3.0` → 当前版本；信号量表述与实现对齐）
+
 ## [0.7.3] - 2026-09-11
 
 ### 修复

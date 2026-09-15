@@ -31,11 +31,18 @@ pub struct LogBus {
     ring: Arc<Mutex<VecDeque<LogEvent>>>,
     capacity: usize,
     next_id: AtomicU64,
+    /// 脱敏开关（v0.8）：写入前把 Cookie/Bearer/authorization 值替换为 ***
+    redact: bool,
 }
 
 impl LogBus {
     /// `capacity` 同时作为环形缓冲与广播缓冲容量（至少 1）
     pub fn new(capacity: usize) -> Self {
+        Self::new_with_redact(capacity, true)
+    }
+
+    /// 带脱敏开关的构造（默认脱敏开；配置 redact_logs=false 可关）
+    pub fn new_with_redact(capacity: usize, redact: bool) -> Self {
         let cap = capacity.clamp(1, 1 << 20);
         let (sender, _) = broadcast::channel(cap);
         Self {
@@ -43,11 +50,18 @@ impl LogBus {
             ring: Arc::new(Mutex::new(VecDeque::with_capacity(cap.min(4096)))),
             capacity: cap,
             next_id: AtomicU64::new(0),
+            redact,
         }
     }
 
     /// 广播并写入环形缓冲（无订阅者时静默丢弃广播）
     pub fn emit(&self, level: &str, kind: &str, req_id: Option<&str>, message: impl Into<String>) {
+        let raw: String = message.into();
+        let message = if self.redact {
+            crate::redact::redact(&raw)
+        } else {
+            raw
+        };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let event = LogEvent {
             id,
@@ -55,7 +69,7 @@ impl LogBus {
             level: level.to_string(),
             kind: kind.to_string(),
             req_id: req_id.map(str::to_string),
-            message: message.into(),
+            message,
         };
         self.push_ring(event.clone());
         // 无订阅者时 send 返回 Err，忽略即可

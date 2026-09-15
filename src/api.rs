@@ -51,6 +51,8 @@ pub struct AppState {
     pub web_threads: Arc<crate::web_threads::WebThreadMap>,
     /// 记忆层运行时开关（面板可热切换；初值来自 config.memory_enabled，默认关）
     pub memory_runtime_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// 双桶并发信号量（v0.8 落地）：免费/订阅两桶，首字节写出前 acquire
+    pub semaphore: Arc<crate::semaphore::TieredSemaphore>,
     pub started: std::time::Instant,
 }
 
@@ -68,11 +70,13 @@ fn set_api_keys(st: &AppState, keys: Vec<String>) {
 
 /// 记忆层运行时开关（热切换，不重启生效）
 fn memory_enabled_now(st: &AppState) -> bool {
-    st.memory_runtime_enabled.load(std::sync::atomic::Ordering::Relaxed)
+    st.memory_runtime_enabled
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn set_memory_runtime_enabled(st: &AppState, enabled: bool) {
-    st.memory_runtime_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    st.memory_runtime_enabled
+        .store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 // axum_core 已对 `S: Clone` 提供 blanket impl FromRef<S> for S，此处无需手动实现。
@@ -127,13 +131,19 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/usage/models", get(handle_usage_models))
         .route("/api/usage/cost", get(handle_usage_cost))
         .route("/api/usage/accounts", get(handle_accounts))
-        .route("/api/skills", get(handle_skills_list).post(handle_skills_upsert))
+        .route(
+            "/api/skills",
+            get(handle_skills_list).post(handle_skills_upsert),
+        )
         .route("/api/skills/toggle", post(handle_skills_toggle))
         .route("/api/skills/delete", post(handle_skills_delete))
         .route("/api/skills/gate", post(handle_skills_gate))
         .route("/api/logs/recent", get(handle_logs_recent))
         .route("/api/logs/stream", get(handle_logs_stream))
-        .route("/api/memory", get(handle_memory_list).post(handle_memory_upsert))
+        .route(
+            "/api/memory",
+            get(handle_memory_list).post(handle_memory_upsert),
+        )
         .route("/api/memory/delete", post(handle_memory_delete))
         .route("/api/memory/static", post(handle_memory_static))
         .route("/api/memory/toggle", post(handle_memory_toggle))
@@ -162,6 +172,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/login/result", get(handle_login_result))
         .route("/api/extension/bundle", get(handle_extension_bundle))
         .route("/api/config/api-key", post(handle_config_api_key))
+        .route(
+            "/api/config",
+            get(handle_config_get).post(handle_config_save),
+        )
         .route("/v1/web/chat", post(handle_web_chat))
         .route(
             "/v1/uploads",
@@ -171,6 +185,50 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/prompts/toggle", post(handle_prompts_toggle))
         .merge(api)
         .with_state(state)
+        // v0.8 安全头：给全部响应加 nosniff / Referrer-Policy / CSP（本地自容面板无外部资源）
+        .layer(tower::ServiceBuilder::new().map_response(secure_headers))
+}
+
+/// 为每个响应附加安全头（幂等：不覆盖已有值，仅补充缺失的）
+///
+/// - X-Content-Type-Options: nosniff —— 防 MIME 嗅探
+/// - Referrer-Policy: strict-origin-when-cross-origin —— 防完整 URL 泄露到外站
+/// - Content-Security-Policy: default-src 'self' —— 本地面板无外部资源，直接收紧
+///
+/// 对 SSE 流响应（text/event-stream）同样适用——头部在首次块写出前已确定。
+fn secure_headers(mut resp: axum::response::Response) -> axum::response::Response {
+    let hs = resp.headers_mut();
+    use axum::http::header;
+    macro_rules! insert_if_missing {
+        ($name:expr, $value:expr) => {{
+            if !hs.contains_key($name) {
+                hs.insert($name, axum::http::HeaderValue::from_static($value));
+            }
+        }};
+    }
+    insert_if_missing!(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    insert_if_missing!(header::REFERRER_POLICY, "strict-origin-when-cross-origin");
+    // CSP 仅面板页（HTML/JS）需要；但统一加也不会破坏 JSON/SSE（浏览器仅对 HTML 应用 CSP 的
+    // script/style 限制；API 响应无内联脚本，default-src 'self' 不影响读取）。
+    // 为安全起见，仅当响应 content-type 含 text/html 时加 CSP，避免对 /v1 数据面造成潜在干扰。
+    let ct = hs
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if ct.contains("text/html") && !hs.contains_key(header::CONTENT_SECURITY_POLICY) {
+        // 面板是无构建单文件（内联 <script>/<style>/onclick），CSP 必须放行内联脚本与样式，
+        // 否则整个面板瘫痪（内联脚本被 default-src 'self' 阻断——Critic 实测 Edge 报
+        // "Refused to execute inline script"，测试台/设置/关于/日志全部失效）。
+        // 保留其余防护：禁止 object/embed/plugin、限制 base-uri、禁止被 iframe 嵌入、只允许自身与 data: 图片。
+        hs.insert(
+            header::CONTENT_SECURITY_POLICY,
+            axum::http::HeaderValue::from_static(
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'",
+            ),
+        );
+    }
+    resp
 }
 
 // ---------- 面板 & 健康 ----------
@@ -186,7 +244,11 @@ async fn handle_healthz(State(st): State<AppState>, headers: HeaderMap) -> Respo
     let dur = st.started.elapsed();
     // 配置了 api_keys 且未通过校验时，只回存活信息——账号名/模型构成不该对未授权方可见
     let keys = api_keys_of(&st);
-    let authorized_ok = if keys.is_empty() { is_loopback_request(&headers) } else { authorized(&headers, &keys) };
+    let authorized_ok = if keys.is_empty() {
+        is_loopback_request(&headers)
+    } else {
+        authorized(&headers, &keys)
+    };
     if !authorized_ok {
         return Json(serde_json::json!({
             "ok": true,
@@ -275,7 +337,11 @@ async fn handle_account_balance(State(st): State<AppState>, headers: HeaderMap) 
         return admin_denied();
     }
     // 候选：先找看起来像 Cookie 的 token（含 session-token），config 优先，其次导入库
-    let looks_like_cookie = |t: &str| t.contains("session-token") || t.contains(".next-auth") || t.contains("callback-url") || t.contains("%3A");
+    // 收窄判定（v0.8）：不再用 "%3A" 兜底——那会把任意 URL 编码串误判为 Cookie；
+    // 只认 next-auth 三件套特征。
+    let looks_like_cookie = |t: &str| {
+        t.contains("session-token") || t.contains(".next-auth") || t.contains("callback-url")
+    };
     let cookie_candidate = st
         .cfg
         .auth_tokens
@@ -306,11 +372,24 @@ async fn handle_account_balance(State(st): State<AppState>, headers: HeaderMap) 
                 let remaining = freebucks.daily.as_ref().map(|d| d.remaining).unwrap_or(0.0);
                 if let Some(prices) = &freebucks.prices {
                     for (model, price) in prices {
-                        let by_credit = if *price > 0.0 { (remaining / price).floor() as i64 } else { i64::MAX };
-                        let by_limit = if let Some(rl) = sess.rate_limits_by_model.as_ref().and_then(|v| v.get(model)) {
+                        let by_credit = if *price > 0.0 {
+                            (remaining / price).floor() as i64
+                        } else {
+                            i64::MAX
+                        };
+                        let by_limit = if let Some(rl) = sess
+                            .rate_limits_by_model
+                            .as_ref()
+                            .and_then(|v| v.get(model))
+                        {
                             let limit = rl.get("limit").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let recent = rl.get("recentCount").and_then(|v| v.as_i64()).unwrap_or(0);
-                            if limit > 0 { (limit - recent).max(0) } else { i64::MAX }
+                            let recent =
+                                rl.get("recentCount").and_then(|v| v.as_i64()).unwrap_or(0);
+                            if limit > 0 {
+                                (limit - recent).max(0)
+                            } else {
+                                i64::MAX
+                            }
                         } else {
                             i64::MAX
                         };
@@ -346,7 +425,10 @@ async fn handle_account_balance(State(st): State<AppState>, headers: HeaderMap) 
 
 /// 读取导入凭证文件中第一个 token（路径可配置）
 fn load_imported_token(path: &str) -> Option<String> {
-    crate::import::load_tokens(path).ok().and_then(|t| t.into_iter().next()).map(|t| t.token)
+    crate::import::load_tokens(path)
+        .ok()
+        .and_then(|t| t.into_iter().next())
+        .map(|t| t.token)
 }
 /// 统一 500 JSON 错误响应
 /// GET /api/prompts — 列出内置提示词与技能（含启用状态）
@@ -364,17 +446,33 @@ async fn handle_prompts_list(State(st): State<AppState>, headers: HeaderMap) -> 
 }
 
 /// POST /api/prompts/toggle — body: { type: "prompt"|"skill", id, enabled }
-async fn handle_prompts_toggle(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_prompts_toggle(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
     let parsed: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "message": "invalid json" }))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "message": "invalid json" })),
+            )
+                .into_response()
+        }
     };
-    let kind = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("prompt");
+    let kind = parsed
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("prompt");
     let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    let enabled = parsed.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let enabled = parsed
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let ok = if kind == "skill" {
         st.prompts.set_skill_enabled(id, enabled).await
     } else {
@@ -392,7 +490,11 @@ async fn handle_prompts_toggle(State(st): State<AppState>, headers: HeaderMap, b
 
 fn internal_err(e: &anyhow::Error) -> Response {
     tracing::error!("用量统计查询失败: {e}");
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": e.to_string() })),
+    )
+        .into_response()
 }
 
 /// 管理端点鉴权失败统一响应
@@ -404,13 +506,26 @@ fn admin_denied() -> Response {
         .into_response()
 }
 
+/// 跨站 Origin 拦截响应（CSRF 防线）：403 Forbidden，语义区别于未认证 401
+fn origin_blocked() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({ "error": { "message": "cross-site request blocked (CSRF): 浏览器跨站请求被拒绝", "type": "forbidden" } })),
+    )
+        .into_response()
+}
+
 /// web 版完整对话代理（Cookie 鉴权 chat/stream → 真实增量 SSE 透传 → OpenAI 兼容）
 /// POST /v1/web/chat — body: { model, content, thread_id?, images? }
 /// images 支持两种形态：["storageId1", ...] 或 [{ storageId, mediaType?, name? }, ...]
 /// 鉴权与 /v1/chat/completions 一致：配置 api_keys 时校验；未配置时仅本机可访问。
-async fn handle_web_chat(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_web_chat(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if !origin_allowed(&headers) {
-        return admin_denied();
+        return origin_blocked();
     }
     let keys = api_keys_of(&st);
     if !keys.is_empty() && !authorized(&headers, &keys) {
@@ -444,9 +559,20 @@ async fn handle_web_chat(State(st): State<AppState>, headers: HeaderMap, body: a
                 .into_response();
         }
     };
-    let model = parsed.get("model").and_then(|m| m.as_str()).unwrap_or("glm-5.3-flash").to_string();
-    let content = parsed.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
-    let thread_id = parsed.get("thread_id").and_then(|t| t.as_str()).map(|s| s.to_string());
+    let model = parsed
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("glm-5.3-flash")
+        .to_string();
+    let content = parsed
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+    let thread_id = parsed
+        .get("thread_id")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string());
     let reasoning_effort = parsed.get("reasoning_effort").and_then(|r| r.as_str());
     // 多模态：解析 images（storageId 字符串数组或对象数组）
     let images: Vec<crate::web_protocol::WebImage> = parsed
@@ -466,9 +592,20 @@ async fn handle_web_chat(State(st): State<AppState>, headers: HeaderMap, body: a
                         let sid = it.get("storageId").and_then(|x| x.as_str())?;
                         Some(crate::web_protocol::WebImage {
                             storage_id: sid.to_string(),
-                            media_type: it.get("mediaType").and_then(|x| x.as_str()).unwrap_or("image/png").to_string(),
-                            name: it.get("name").and_then(|x| x.as_str()).unwrap_or("image.png").to_string(),
-                            description_storage_id: it.get("descriptionStorageId").and_then(|x| x.as_str()).map(String::from),
+                            media_type: it
+                                .get("mediaType")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("image/png")
+                                .to_string(),
+                            name: it
+                                .get("name")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("image.png")
+                                .to_string(),
+                            description_storage_id: it
+                                .get("descriptionStorageId")
+                                .and_then(|x| x.as_str())
+                                .map(String::from),
                         })
                     }
                 })
@@ -503,8 +640,16 @@ async fn handle_web_chat(State(st): State<AppState>, headers: HeaderMap, body: a
                         let sid = it.get("storageId").and_then(|x| x.as_str())?;
                         Some(crate::web_protocol::WebAttachment {
                             storage_id: sid.to_string(),
-                            media_type: it.get("mediaType").and_then(|x| x.as_str()).unwrap_or("application/octet-stream").to_string(),
-                            name: it.get("name").and_then(|x| x.as_str()).unwrap_or("file").to_string(),
+                            media_type: it
+                                .get("mediaType")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("application/octet-stream")
+                                .to_string(),
+                            name: it
+                                .get("name")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("file")
+                                .to_string(),
                             chars: it.get("chars").and_then(|x| x.as_i64()),
                             truncated: it.get("truncated").and_then(|x| x.as_bool()),
                         })
@@ -520,11 +665,21 @@ async fn handle_web_chat(State(st): State<AppState>, headers: HeaderMap, body: a
         Err(e) => return internal_err(&anyhow::Error::msg(e.to_string())),
     };
     // 真实增量流：上游 chat/stream SSE 逐事件实时转发为 OpenAI chunk（images 透传多模态）
-    match client.chat_stream_raw(thread_id.as_deref(), &content, reasoning_effort, images, attachments).await {
+    match client
+        .chat_stream_raw(
+            thread_id.as_deref(),
+            &content,
+            reasoning_effort,
+            images,
+            attachments,
+        )
+        .await
+    {
         Ok(body) => {
             // 遥测：旁路扫描流（首字节/字节数/usage）+ 完成后上报（web 协议用 Cookie，标记 web-cookie）
             let req_id = uuid::Uuid::new_v4().to_string();
-            let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(16);
+            let (tx, rx) =
+                tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(16);
             let telem = st.telemetry.clone();
             let logs = st.logs.clone();
             let usage_db = st.usage.clone();
@@ -560,7 +715,17 @@ async fn handle_web_chat(State(st): State<AppState>, headers: HeaderMap, body: a
                 let total_ms = t0.elapsed().as_millis() as u64;
                 let (pt, ct) = extract_usage(&tail).unwrap_or((0, 0));
                 usage_db
-                    .record_ex("web-cookie", &model_name, pt as i64, ct as i64, total_ms as i64, 200, "", "", &req_id)
+                    .record_ex(
+                        "web-cookie",
+                        &model_name,
+                        pt as i64,
+                        ct as i64,
+                        total_ms as i64,
+                        200,
+                        "",
+                        "",
+                        &req_id,
+                    )
                     .ok();
                 telem.record(TraceRow {
                     req_id: req_id.clone(),
@@ -576,7 +741,9 @@ async fn handle_web_chat(State(st): State<AppState>, headers: HeaderMap, body: a
                     stream: true,
                     error_kind: None,
                     error_excerpt: None,
-                    route_reason: Some(format!("web protocol, images={images_count}, attachments={attachments_count}")),
+                    route_reason: Some(format!(
+                        "web protocol, images={images_count}, attachments={attachments_count}"
+                    )),
                     api_key: None,
                     client_ip: None,
                 });
@@ -640,12 +807,20 @@ fn decide_bridge_mode(
     let last_user = crate::web_threads::flatten_messages(messages, true).map(|(_, l)| l)?;
     let has_assistant = messages
         .as_array()
-        .map(|a| a.iter().any(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant")))
+        .map(|a| {
+            a.iter()
+                .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+        })
         .unwrap_or(false);
     if has_assistant {
         if let Some(b) = map.get(cred_id) {
             if !b.thread_id.is_empty() {
-                return Some((BridgeMode::Continue { thread_id: b.thread_id }, last_user));
+                return Some((
+                    BridgeMode::Continue {
+                        thread_id: b.thread_id,
+                    },
+                    last_user,
+                ));
             }
         }
     }
@@ -665,8 +840,14 @@ async fn web_bridge_openai(
 ) -> Response {
     let start = std::time::Instant::now();
     let req_id = uuid::Uuid::new_v4().to_string();
-    let stream = parsed.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
-    let messages = parsed.get("messages").cloned().unwrap_or_else(|| serde_json::json!([]));
+    let stream = parsed
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let messages = parsed
+        .get("messages")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
 
     // 记忆/技能注入（与桌面协议同管线），再摊平为 web 协议 content
     let mut effective = messages.clone();
@@ -676,7 +857,10 @@ async fn web_bridge_openai(
     let sys_prefix = build_system_prefix(&st, &mem_query).await;
     if !sys_prefix.trim().is_empty() {
         if let Some(arr) = effective.as_array_mut() {
-            arr.insert(0, serde_json::json!({ "role": "system", "content": sys_prefix }));
+            arr.insert(
+                0,
+                serde_json::json!({ "role": "system", "content": sys_prefix }),
+            );
         }
     }
 
@@ -691,20 +875,56 @@ async fn web_bridge_openai(
         }
     };
 
-    let client = match crate::web_protocol::WebClient::new(cookie, model.clone()) {
+    // v0.8 双桶并发信号量：桥接路径同样在首字节写出前 acquire（保守：web 凭证默认免费桶，
+    // 若含套餐字段则订阅桶）。guard 由后台转发任务持有到流结束。
+    let bridge_is_sub = crate::semaphore::is_subscriber_token(&cookie, None);
+    // 测试钩子：FREEBUFF2API_WEB_HOST 可覆盖上游 host（生产保持 WEB_HOST 默认）
+    let web_host = std::env::var("FREEBUFF2API_WEB_HOST")
+        .unwrap_or_else(|_| crate::web_protocol::WEB_HOST.to_string());
+    let client = match crate::web_protocol::WebClient::with_host(cookie, model.clone(), &web_host) {
         Ok(c) => c,
         Err(e) => return internal_err(&anyhow::Error::msg(e.to_string())),
     };
+    let bridge_guard = match st.semaphore.acquire(bridge_is_sub).await {
+        Ok(g) => g,
+        Err(_) => {
+            let ms = start.elapsed().as_millis() as i64;
+            st.usage
+                .record_ex("web-cookie", &model, 0, 0, ms, 429, "", "", &req_id)
+                .ok();
+            st.telemetry
+                .event(&req_id, "concurrency_busy", "桥接并发桶已满");
+            st.logs.emit(
+                "warn",
+                "request",
+                Some(&req_id),
+                format!("{model} 桥接并发桶已满，返回 429"),
+            );
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": { "message": "too many concurrent requests to upstream, retry later", "type": "server_error", "code": "concurrency_busy" } })),
+            )
+                .into_response();
+        }
+    };
     let (thread_id, content, reason) = match &mode {
-        BridgeMode::Continue { thread_id } => (Some(thread_id.clone()), last_user.clone(), "web bridge, reuse thread".to_string()),
-        BridgeMode::Fresh { prompt } => (None, prompt.clone(), "web bridge, new thread".to_string()),
+        BridgeMode::Continue { thread_id } => (
+            Some(thread_id.clone()),
+            last_user.clone(),
+            "web bridge, reuse thread".to_string(),
+        ),
+        BridgeMode::Fresh { prompt } => {
+            (None, prompt.clone(), "web bridge, new thread".to_string())
+        }
     };
     st.telemetry.event(
         &req_id,
         "route",
         &format!(
             "{requested} -> {model} via web-cookie({}) [{}]",
-            cred.get("token_masked").and_then(|v| v.as_str()).unwrap_or("?"),
+            cred.get("token_masked")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
             match &mode {
                 BridgeMode::Continue { thread_id } => format!("continue {thread_id}"),
                 BridgeMode::Fresh { .. } => "new thread".into(),
@@ -724,7 +944,19 @@ async fn web_bridge_openai(
                 st.telemetry.event(&req_id, "thread_reset", &e.to_string());
             }
             let ms = start.elapsed().as_millis() as i64;
-            st.usage.record_ex("web-cookie", &model, 0, 0, ms, 502, "upstream_5xx", &e.to_string(), &req_id).ok();
+            st.usage
+                .record_ex(
+                    "web-cookie",
+                    &model,
+                    0,
+                    0,
+                    ms,
+                    502,
+                    "upstream_5xx",
+                    &e.to_string(),
+                    &req_id,
+                )
+                .ok();
             st.telemetry.record(TraceRow {
                 req_id: req_id.clone(),
                 endpoint: "/v1/chat/completions".into(),
@@ -770,6 +1002,7 @@ async fn web_bridge_openai(
     };
     let est_input_track = est_input_chars;
     tokio::spawn(async move {
+        let _bridge_guard_keep = bridge_guard; // 桥接流期间持有并发 permit，任务结束 Drop 归还
         let mut stream_ = body.into_data_stream();
         let mut ttft: Option<u64> = None;
         let mut bytes: u64 = 0;
@@ -808,10 +1041,7 @@ async fn web_bridge_openai(
             Some(v) => v,
             None => {
                 let out_chars: usize = count_bridge_content_chars(&tail);
-                (
-                    estimate_tokens(est_input_track),
-                    estimate_tokens(out_chars),
-                )
+                (estimate_tokens(est_input_track), estimate_tokens(out_chars))
             }
         };
         // 桥接流内嵌错误识别（Critic-J P2-1 闭环）：优先用 StreamEncoder 旁路槽
@@ -832,7 +1062,10 @@ async fn web_bridge_openai(
                 total_ms as i64,
                 status,
                 bridge_kind.unwrap_or(""),
-                bridge_kind.map(|k| format!("上游桥接流内嵌错误（{k}）：凭证可能失效或额度耗尽")).as_deref().unwrap_or(""),
+                bridge_kind
+                    .map(|k| format!("上游桥接流内嵌错误（{k}）：凭证可能失效或额度耗尽"))
+                    .as_deref()
+                    .unwrap_or(""),
                 &req_id_track,
             )
             .ok();
@@ -857,7 +1090,9 @@ async fn web_bridge_openai(
         st_logs_done(&telem, &req_id_track, &model_track, bytes, total_ms as u128);
     });
 
-    let body_stream = futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
+    let body_stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
     if !stream {
         return aggregate_bridge_sse(Box::pin(body_stream), &model, &req_id).await;
     }
@@ -872,7 +1107,11 @@ async fn web_bridge_openai(
 
 /// 桥接路径完成日志（后台任务收尾时调用，避免闭包捕获整个 AppState）
 fn st_logs_done(telem: &TelemetryWriter, req_id: &str, model: &str, bytes: u64, total_ms: u128) {
-    telem.event(req_id, "done", &format!("web bridge {model}：{bytes}B / {total_ms}ms"));
+    telem.event(
+        req_id,
+        "done",
+        &format!("web bridge {model}：{bytes}B / {total_ms}ms"),
+    );
 }
 
 /// 识别桥接 SSE 流中的上游内嵌错误（200 内嵌 error envelope）。
@@ -883,14 +1122,21 @@ fn detect_bridge_error(tail: &str) -> Option<&'static str> {
         return None;
     }
     for line in tail.lines() {
-        let Some(data) = line.strip_prefix("data: ") else { continue };
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
         let data = data.trim();
         if data == "[DONE]" {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
         if let Some(err) = v.get("error") {
-            let body_text = err.as_str().map(String::from).unwrap_or_else(|| err.to_string());
+            let body_text = err
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| err.to_string());
             let kind = crate::errors::classify(200, &body_text);
             return Some(kind.as_str());
         }
@@ -907,7 +1153,8 @@ async fn openai_error_to_claude(resp: Response, model: &str) -> Response {
     if !model.is_empty() {
         parts.headers.insert(
             axum::http::HeaderName::from_static("x-bridge-model"),
-            axum::http::HeaderValue::from_str(model).unwrap_or(axum::http::HeaderValue::from_static("")),
+            axum::http::HeaderValue::from_str(model)
+                .unwrap_or(axum::http::HeaderValue::from_static("")),
         );
     }
     let ct = parts
@@ -921,7 +1168,9 @@ async fn openai_error_to_claude(resp: Response, model: &str) -> Response {
     // SSE：整条收完再一次性转换（桥接流通常几秒内结束，聚合实现简单且正确；
     // chunk 级实时转换留作后续优化）
     if ct.contains("text/event-stream") {
-        let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024).await.unwrap_or_default();
+        let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
         let raw = String::from_utf8_lossy(&bytes);
         let (text, mut model, finish, usage) = collect_openai_stream(&raw);
         if model.is_empty() {
@@ -942,7 +1191,9 @@ async fn openai_error_to_claude(resp: Response, model: &str) -> Response {
     }
 
     // JSON（成功或错误）
-    let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024).await.unwrap_or_default();
+    let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024)
+        .await
+        .unwrap_or_default();
     let v: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(_) => {
@@ -954,15 +1205,26 @@ async fn openai_error_to_claude(resp: Response, model: &str) -> Response {
         }
     };
     if let Some(err) = v.get("error") {
-        let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("上游错误");
-        let code = if status == StatusCode::UNAUTHORIZED { "authentication_error" } else { "api_error" };
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("上游错误");
+        let code = if status == StatusCode::UNAUTHORIZED {
+            "authentication_error"
+        } else {
+            "api_error"
+        };
         return (
             status,
             Json(serde_json::json!({ "type": "error", "error": { "type": code, "message": msg } })),
         )
             .into_response();
     }
-    let model = v.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    let model = v
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
     Json(openai_to_claude_response(&v, &model)).into_response()
 }
 
@@ -973,18 +1235,30 @@ fn collect_openai_stream(raw: &str) -> (String, String, Option<String>, Option<s
     let mut finish = None;
     let mut usage = None;
     for line in raw.lines() {
-        let Some(data) = line.strip_prefix("data: ") else { continue };
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
         let data = data.trim();
         if data == "[DONE]" {
             break;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
         if model.is_empty() {
-            model = v.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+            model = v
+                .get("model")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
         }
         if let Some(choices) = v.get("choices").and_then(|c| c.as_array()) {
             if let Some(c0) = choices.first() {
-                if let Some(d) = c0.get("delta").and_then(|d| d.get("content")).and_then(|t| t.as_str()) {
+                if let Some(d) = c0
+                    .get("delta")
+                    .and_then(|d| d.get("content"))
+                    .and_then(|t| t.as_str())
+                {
                     text.push_str(d);
                 }
                 if let Some(fr) = c0.get("finish_reason").and_then(|f| f.as_str()) {
@@ -1010,7 +1284,9 @@ fn claude_stream_events(
         .map(|u| {
             (
                 u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                u.get("completion_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+                u.get("completion_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
             )
         })
         .unwrap_or((0, 0));
@@ -1037,7 +1313,10 @@ fn claude_stream_events(
             },
         }),
     );
-    send("content_block_start", serde_json::json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }));
+    send(
+        "content_block_start",
+        serde_json::json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }),
+    );
     // 按 512 字节切片推 delta，保持"流式"语义（长回答不至于一次性砸给客户端）
     let bytes = text.as_bytes();
     let mut i = 0usize;
@@ -1048,10 +1327,16 @@ fn claude_stream_events(
             end += 1;
         }
         let piece = String::from_utf8_lossy(&bytes[i..end]);
-        send("content_block_delta", serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": piece } }));
+        send(
+            "content_block_delta",
+            serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": piece } }),
+        );
         i = end;
     }
-    send("content_block_stop", serde_json::json!({ "type": "content_block_stop", "index": 0 }));
+    send(
+        "content_block_stop",
+        serde_json::json!({ "type": "content_block_stop", "index": 0 }),
+    );
     let stop_reason = match finish_reason {
         Some("tool_calls") => "tool_use",
         Some("length") => "max_tokens",
@@ -1065,7 +1350,10 @@ fn claude_stream_events(
             "usage": { "output_tokens": output_tokens },
         }),
     );
-    send("message_stop", serde_json::json!({ "type": "message_stop" }));
+    send(
+        "message_stop",
+        serde_json::json!({ "type": "message_stop" }),
+    );
     out
 }
 
@@ -1093,14 +1381,21 @@ async fn aggregate_bridge_sse(
     let mut finish_reason: Option<String> = None;
     let mut usage: Option<serde_json::Value> = None;
     for line in raw.lines() {
-        let Some(data) = line.strip_prefix("data: ") else { continue };
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
         let data = data.trim();
         if data == "[DONE]" {
             break;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
         if let Some(err) = v.get("error") {
-            let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("上游错误");
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("上游错误");
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({ "error": { "message": msg, "type": "server_error" } })),
@@ -1109,7 +1404,11 @@ async fn aggregate_bridge_sse(
         }
         if let Some(choices) = v.get("choices").and_then(|c| c.as_array()) {
             if let Some(c0) = choices.first() {
-                if let Some(d) = c0.get("delta").and_then(|d| d.get("content")).and_then(|t| t.as_str()) {
+                if let Some(d) = c0
+                    .get("delta")
+                    .and_then(|d| d.get("content"))
+                    .and_then(|t| t.as_str())
+                {
                     content.push_str(d);
                 }
                 if let Some(fr) = c0.get("finish_reason").and_then(|f| f.as_str()) {
@@ -1133,7 +1432,9 @@ async fn aggregate_bridge_sse(
         .map(|u| {
             (
                 u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                u.get("completion_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+                u.get("completion_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
             )
         })
         .unwrap_or((0, 0));
@@ -1166,7 +1467,11 @@ async fn handle_accounts(State(st): State<AppState>, headers: HeaderMap) -> Resp
 // ---------- Token 导入（curl / HAR 自动解析入库） ----------
 
 /// POST /api/tokens/import — body 传 curl 命令文本或 HAR JSON，自动提取 Bearer token 入库
-async fn handle_token_import(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_token_import(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -1217,18 +1522,16 @@ async fn handle_token_import(State(st): State<AppState>, headers: HeaderMap, bod
             let new_accounts: Vec<crate::pool::AccountEntry> = added
                 .iter()
                 .filter(|t| !t.token.contains("session-token"))
-                .map(|t| {
-                    crate::pool::AccountEntry {
-                        name: format!("import-{}", t.token.chars().take(6).collect::<String>()),
-                        token: t.token.clone(),
-                        session: std::sync::Arc::new(crate::session::SessionManager::new(
-                            st.client.clone(),
-                            t.token.clone(),
-                            (*st.cfg).clone(),
-                        )),
-                        score: tokio::sync::RwLock::new(0.0),
-                        breaker: tokio::sync::RwLock::new(crate::pool::CircuitBreaker::new()),
-                    }
+                .map(|t| crate::pool::AccountEntry {
+                    name: format!("import-{}", t.token.chars().take(6).collect::<String>()),
+                    token: t.token.clone(),
+                    session: std::sync::Arc::new(crate::session::SessionManager::new(
+                        st.client.clone(),
+                        t.token.clone(),
+                        (*st.cfg).clone(),
+                    )),
+                    score: tokio::sync::RwLock::new(0.0),
+                    breaker: tokio::sync::RwLock::new(crate::pool::CircuitBreaker::new()),
                 })
                 .collect();
             // 非 Bearer 凭证（web-cookie）不入池，但仍计入"导入成功"响应
@@ -1281,7 +1584,8 @@ async fn handle_tokens_list(State(st): State<AppState>, headers: HeaderMap) -> R
                     })
                 })
                 .collect();
-            Json(serde_json::json!({ "ok": true, "count": list.len(), "tokens": list })).into_response()
+            Json(serde_json::json!({ "ok": true, "count": list.len(), "tokens": list }))
+                .into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1292,7 +1596,11 @@ async fn handle_tokens_list(State(st): State<AppState>, headers: HeaderMap) -> R
 }
 
 /// POST /api/tokens/check — body `{"id":"<凭证id>"}`：对指定凭证拉取账号全貌并刷新缓存
-async fn handle_token_check(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_token_check(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -1342,7 +1650,11 @@ async fn handle_token_check(State(st): State<AppState>, headers: HeaderMap, body
         if ok { "info" } else { "warn" },
         "account",
         None,
-        format!("凭证检查 {}：{}", mask(&tok.token), if ok { "有效" } else { "可能已失效" }),
+        format!(
+            "凭证检查 {}：{}",
+            mask(&tok.token),
+            if ok { "有效" } else { "可能已失效" }
+        ),
     );
     Json(serde_json::json!({
         "ok": ok,
@@ -1355,7 +1667,11 @@ async fn handle_token_check(State(st): State<AppState>, headers: HeaderMap, body
 }
 
 /// POST /api/tokens/delete — body `{"id":"<凭证id>"}`：删除凭证（落盘 + 内存账号池 + 缓存）
-async fn handle_token_delete(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_token_delete(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -1370,7 +1686,12 @@ async fn handle_token_delete(State(st): State<AppState>, headers: HeaderMap, bod
         Ok(Some(removed)) => {
             let in_pool = st.pool.remove_account(&removed.token).await;
             let _ = st.meta.remove(&id);
-            st.logs.emit("warn", "account", None, format!("已删除凭证 {}", mask(&removed.token)));
+            st.logs.emit(
+                "warn",
+                "account",
+                None,
+                format!("已删除凭证 {}", mask(&removed.token)),
+            );
             Json(serde_json::json!({
                 "ok": true,
                 "removed": mask(&removed.token),
@@ -1379,7 +1700,11 @@ async fn handle_token_delete(State(st): State<AppState>, headers: HeaderMap, bod
             }))
             .into_response()
         }
-        Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "ok": false, "message": "未找到该凭证（可能已被删除）" }))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "未找到该凭证（可能已被删除）" })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "ok": false, "message": format!("删除失败：{e}") })),
@@ -1397,7 +1722,11 @@ struct HistoryQuery {
 }
 
 /// GET /api/account/history — 账号使用记录（按凭证可查；最新在前）
-async fn handle_account_history(State(st): State<AppState>, headers: HeaderMap, Query(q): Query<HistoryQuery>) -> Response {
+async fn handle_account_history(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HistoryQuery>,
+) -> Response {
     if !admin_authorized(&headers, &st) {
         return admin_denied();
     }
@@ -1478,7 +1807,11 @@ async fn handle_login_result(State(st): State<AppState>, headers: HeaderMap) -> 
 /// `/api/tokens/import` 入库，然后窗口自关。面板轮询 `/api/tokens` 感知凭证增加。
 ///
 /// 平台支持：Windows（WebView2 Runtime）；不支持时返回 ok:false + 原因，前端降级到扩展/剪贴板/手动。
-async fn handle_login_embed(State(st): State<AppState>, headers: HeaderMap, _body: axum::body::Bytes) -> Response {
+async fn handle_login_embed(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    _body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -1491,7 +1824,12 @@ async fn handle_login_embed(State(st): State<AppState>, headers: HeaderMap, _bod
         .unwrap_or(47821);
     let spawned = crate::login_window::spawn_login_window(port);
     if spawned {
-        st.logs.emit("info", "login", None, "内嵌 WebView2 登录窗口已弹出（等待用户完成 GitHub 登录）");
+        st.logs.emit(
+            "info",
+            "login",
+            None,
+            "内嵌 WebView2 登录窗口已弹出（等待用户完成 GitHub 登录）",
+        );
         Json(serde_json::json!({
             "ok": true,
             "message": "登录窗口已弹出，完成 GitHub 登录后凭证将自动入库",
@@ -1515,19 +1853,32 @@ async fn handle_login_embed(State(st): State<AppState>, headers: HeaderMap, _bod
 ///
 /// 扩展文件编译期内嵌，单文件分发（没有源码目录）时同样可用。
 /// 面板用 `window.open` 下载，浏览器不会带 Authorization 头，故同时接受 `?key=`（与日志 SSE 同一策略）。
-async fn handle_extension_bundle(State(st): State<AppState>, headers: HeaderMap, Query(q): Query<KeyQuery>) -> Response {
+async fn handle_extension_bundle(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<KeyQuery>,
+) -> Response {
     let keys = api_keys_of(&st);
     let query_ok = !keys.is_empty()
-        && q.key.as_deref().map(|k| keys.iter().any(|x| x == k)).unwrap_or(false);
+        && q.key
+            .as_deref()
+            .map(|k| keys.iter().any(|x| x == k))
+            .unwrap_or(false);
     if !admin_authorized(&headers, &st) && !query_ok {
         return admin_denied();
     }
     let zip = crate::extension::build_zip();
-    let filename = format!("freebuff2api-extension-v{}.zip", crate::extension::version());
+    let filename = format!(
+        "freebuff2api-extension-v{}.zip",
+        crate::extension::version()
+    );
     match Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/zip")
-        .header("content-disposition", format!("attachment; filename=\"{filename}\""))
+        .header(
+            "content-disposition",
+            format!("attachment; filename=\"{filename}\""),
+        )
         .header("cache-control", "no-store")
         .body(Body::from(zip))
     {
@@ -1538,7 +1889,11 @@ async fn handle_extension_bundle(State(st): State<AppState>, headers: HeaderMap,
 
 /// POST /api/config/api-key — body `{"action":"generate"|"set"|"clear","key":"..."}`
 /// 一键生成/设置/清除下游 API Key，写回 config.json **并立即热生效**（无需重启）。
-async fn handle_config_api_key(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_config_api_key(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -1546,24 +1901,36 @@ async fn handle_config_api_key(State(st): State<AppState>, headers: HeaderMap, b
         Ok(v) => v,
         Err(_) => return bad_req("body 必须是 JSON"),
     };
-    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("generate");
+    let action = v
+        .get("action")
+        .and_then(|x| x.as_str())
+        .unwrap_or("generate");
     let current = api_keys_of(&st);
 
     let new_keys: Vec<String> = match action {
         "generate" => {
             // 密码学随机（OsRng 32 字节 → 32 字符 base64url 字符集映射，192 位有效熵），
             // 不可预测/不可枚举；UUIDv4 只有 122 位随机且格式可识别
-            use rand::RngCore;
             use rand::rngs::OsRng;
-            const B64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            use rand::RngCore;
+            const B64URL: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
             let mut raw = [0u8; 32];
             OsRng.fill_bytes(&mut raw);
-            let token: String = raw.iter().map(|b| B64URL[(b & 63) as usize] as char).collect();
+            let token: String = raw
+                .iter()
+                .map(|b| B64URL[(b & 63) as usize] as char)
+                .collect();
             let k = format!("sk-fb-{token}");
             vec![k]
         }
         "set" => {
-            let k = v.get("key").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let k = v
+                .get("key")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if k.len() < 8 {
                 return bad_req("Key 太短（至少 8 个字符）");
             }
@@ -1572,7 +1939,9 @@ async fn handle_config_api_key(State(st): State<AppState>, headers: HeaderMap, b
         "clear" => {
             // 安全守卫：非本机监听时禁止清空（否则管理端点/凭证对网络裸奔）
             if !crate::config::is_loopback_listen(&st.cfg.listen_addr) {
-                return bad_req("当前监听的是非本机地址，禁止清空 API Key（否则面板与凭证会暴露给网络）");
+                return bad_req(
+                    "当前监听的是非本机地址，禁止清空 API Key（否则面板与凭证会暴露给网络）",
+                );
             }
             vec![]
         }
@@ -1611,7 +1980,12 @@ async fn handle_config_api_key(State(st): State<AppState>, headers: HeaderMap, b
     }
 
     set_api_keys(&st, new_keys.clone());
-    st.logs.emit("warn", "config", None, format!("下游 API Key 已更新（{} 个）", new_keys.len()));
+    st.logs.emit(
+        "warn",
+        "config",
+        None,
+        format!("下游 API Key 已更新（{} 个）", new_keys.len()),
+    );
     Json(serde_json::json!({
         "ok": true,
         "action": action,
@@ -1630,9 +2004,225 @@ async fn handle_config_api_key(State(st): State<AppState>, headers: HeaderMap, b
     .into_response()
 }
 
+/// 设置页可编辑的配置项白名单（key → 默认值类型）。仅暴露 UI 能安全修改的字段。
+const CONFIG_EDITABLE: &[(&str, &str)] = &[
+    ("listen_addr", "string"),
+    ("memory_enabled", "bool"),
+    ("token_saver", "bool"),
+    ("skills_inject_mode", "string"),
+    ("max_roster_tokens", "usize"),
+    ("http_proxy", "string"),
+    ("thread_cleanup_interval_sec", "u64"),
+    ("thread_max_age_hours", "u64"),
+    ("redact_logs", "bool"),
+    ("concurrency_free_slots", "usize"),
+    ("concurrency_free_multi", "usize"),
+    ("concurrency_sub_slots", "usize"),
+    ("concurrency_sub_multi", "usize"),
+];
+
+/// GET /api/config — 返回当前配置中可编辑字段（脱敏，供设置页回显）
+async fn handle_config_get(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authorized(&headers, &st) {
+        return admin_denied();
+    }
+    let cfg = &st.cfg;
+    let mut editable = serde_json::Map::new();
+    for (key, _) in CONFIG_EDITABLE {
+        let v = match *key {
+            "listen_addr" => serde_json::json!(cfg.listen_addr),
+            "memory_enabled" => serde_json::json!(cfg.memory_enabled),
+            "token_saver" => serde_json::json!(cfg.token_saver),
+            "skills_inject_mode" => serde_json::json!(cfg.skills_inject_mode),
+            "max_roster_tokens" => serde_json::json!(cfg.max_roster_tokens),
+            "http_proxy" => serde_json::json!(cfg.http_proxy),
+            "thread_cleanup_interval_sec" => serde_json::json!(cfg.thread_cleanup_interval_sec),
+            "thread_max_age_hours" => serde_json::json!(cfg.thread_max_age_hours),
+            "redact_logs" => serde_json::json!(cfg.redact_logs),
+            "concurrency_free_slots" => serde_json::json!(cfg.concurrency_free_slots),
+            "concurrency_free_multi" => serde_json::json!(cfg.concurrency_free_multi),
+            "concurrency_sub_slots" => serde_json::json!(cfg.concurrency_sub_slots),
+            "concurrency_sub_multi" => serde_json::json!(cfg.concurrency_sub_multi),
+            _ => continue,
+        };
+        editable.insert((*key).to_string(), v);
+    }
+    Json(serde_json::json!({
+        "ok": true,
+        "memory_runtime_enabled": memory_enabled_now(&st),
+        "editable": editable,
+        "note": "listen_addr 修改后需重启生效；其余项热生效或写回后重启",
+    }))
+    .into_response()
+}
+
+/// POST /api/config/save — body `{"key":"listen_addr","value":"..."}`：白名单校验后原子写回 config.json。
+/// 运行时热生效的项（memory_enabled / token_saver / redact_logs / 信号量容量）同步更新内存态。
+async fn handle_config_save(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Some(resp) = write_guard(&headers, &st) {
+        return resp;
+    }
+    let v: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return bad_req("body 必须是 JSON"),
+    };
+    let key = v
+        .get("key")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let value = v.get("value").cloned().unwrap_or(serde_json::Value::Null);
+    let kind = CONFIG_EDITABLE
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, t)| *t);
+    let Some(kind) = kind else {
+        return bad_req(&format!("不允许修改配置项: {key}（白名单外）"));
+    };
+    // 类型校验 + 合法值检查
+    let typed: serde_json::Value = match kind {
+        "bool" => serde_json::json!(value.as_bool().unwrap_or(false)),
+        "usize" | "u64" => {
+            let n = value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|s| s.parse().ok()));
+            let Some(n) = n else {
+                return bad_req("该配置项需要整数");
+            };
+            serde_json::json!(n)
+        }
+        _ => value.clone(),
+    };
+    // 合法值校验
+    match key.as_str() {
+        "listen_addr" => {
+            let s = typed.as_str().unwrap_or("").trim().to_string();
+            if s.is_empty() {
+                return bad_req("监听地址不能为空");
+            }
+            // 校验 host:port 形态（简单检查冒号）
+            if !s.contains(':') {
+                return bad_req("监听地址格式应为 host:port（如 127.0.0.1:47821）");
+            }
+            // 安全守卫：改为非本机地址时必须已有 api_keys（否则管理端点/凭证对网络裸奔）
+            if !crate::config::is_loopback_listen(&s) && api_keys_of(&st).is_empty() {
+                return bad_req(
+                    "安全拒绝：非本机监听地址要求先配置 api_keys（防止面板与凭证暴露给网络）",
+                );
+            }
+        }
+        "skills_inject_mode" => {
+            let s = typed.as_str().unwrap_or("").trim();
+            if !matches!(s, "roster" | "full") {
+                return bad_req("技能注入模式仅支持 roster 或 full");
+            }
+        }
+        "http_proxy" => {
+            let s = typed.as_str().unwrap_or("").trim();
+            if !(s.is_empty()
+                || s.starts_with("http://")
+                || s.starts_with("https://")
+                || s.starts_with("socks5://")
+                || s.starts_with("socks5h://"))
+            {
+                return bad_req("代理地址需以 http:// / https:// / socks5:// 开头");
+            }
+        }
+        "concurrency_free_slots"
+        | "concurrency_free_multi"
+        | "concurrency_sub_slots"
+        | "concurrency_sub_multi" => {
+            let n = typed.as_u64().unwrap_or(0);
+            if n == 0 {
+                return bad_req("并发容量必须 ≥ 1");
+            }
+        }
+        _ => {}
+    }
+
+    // 原子写回 config.json（Value 往返合并，不覆盖用户其他配置）
+    let path = crate::config::resolve_config_path();
+    let persisted = if let Some(p) = path.as_deref() {
+        let mut root: serde_json::Value = std::fs::read_to_string(p)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !root.is_object() {
+            root = serde_json::json!({});
+        }
+        root[key.clone()] = typed.clone();
+        let write_res = serde_json::to_string_pretty(&root)
+            .map_err(|e| e.to_string())
+            .and_then(|s| {
+                let tmp = format!("{p}.tmp");
+                std::fs::write(&tmp, s.clone()).map_err(|e| e.to_string())?;
+                #[cfg(windows)]
+                if std::path::Path::new(p).exists() {
+                    let _ = std::fs::remove_file(p);
+                }
+                std::fs::rename(&tmp, p).map_err(|e| e.to_string())
+            });
+        match write_res {
+            Ok(()) => {
+                tracing::info!("配置项 {key} 已写回 {p}");
+                true
+            }
+            Err(e) => {
+                tracing::warn!("配置项 {key} 写回失败: {e}（仅本次运行生效）");
+                false
+            }
+        }
+    } else {
+        tracing::warn!("未找到 config.json，配置项仅在本次运行内生效");
+        false
+    };
+
+    // 运行时热生效（不重启即改内存态）
+    let mut hot_applied = false;
+    if key == "memory_enabled" {
+        set_memory_runtime_enabled(&st, typed.as_bool().unwrap_or(false));
+        hot_applied = true;
+    }
+
+    st.logs.emit(
+        "info",
+        "config",
+        None,
+        format!(
+            "配置项 {key} 已更新（{}）",
+            if persisted {
+                "已写入 config.json"
+            } else {
+                "仅本次运行"
+            }
+        ),
+    );
+    Json(serde_json::json!({
+        "ok": true,
+        "key": key,
+        "value": typed,
+        "persisted": persisted,
+        "hot_applied": hot_applied,
+        "message": match key.as_str() {
+            "listen_addr" => "监听地址已写回，需重启网关生效",
+            _ => if hot_applied { "已保存并立即生效" } else { "已写入 config.json，重启后生效" },
+        },
+    }))
+    .into_response()
+}
+
 /// 账户详情卡片数据（每个账号的余额/套餐/限额）
 /// POST /api/account/detail — body { cookie: "..." } 可选；空则用已导入第一个
-async fn handle_account_detail(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_account_detail(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if !admin_authorized(&headers, &st) {
         return admin_denied();
     }
@@ -1648,8 +2238,14 @@ async fn handle_account_detail(State(st): State<AppState>, headers: HeaderMap, b
         }
     }
     let cookie = cookie.or_else(|| {
-        st.cfg.auth_tokens.iter().find(|t| t.contains("session-token")).cloned()
-            .or_else(|| load_imported_token(&st.cfg.tokens_path).filter(|t| t.contains("session-token")))
+        st.cfg
+            .auth_tokens
+            .iter()
+            .find(|t| t.contains("session-token"))
+            .cloned()
+            .or_else(|| {
+                load_imported_token(&st.cfg.tokens_path).filter(|t| t.contains("session-token"))
+            })
     });
     let cookie = match cookie {
         Some(c) => c,
@@ -1706,12 +2302,16 @@ fn mask(token: &str) -> String {
 
 // ---------- OpenAI 兼容 ----------
 
-async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_chat_completions(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     // 数据面 CSRF 防线：浏览器跨站请求会带 Origin（text/plain 简单请求可绕过预检，
     // handler 不看 content-type 照样解析 body——必须拦 Origin）。
     // SDK/curl 不带 Origin，不受影响。
     if !origin_allowed(&headers) {
-        return admin_denied();
+        return origin_blocked();
     }
     let start = std::time::Instant::now();
     let req_id = uuid::Uuid::new_v4().to_string();
@@ -1727,7 +2327,11 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
         }
     };
 
-    let requested = parsed.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    let requested = parsed
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
     if requested.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -1777,7 +2381,13 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
         .get("x-api-key")
         .or_else(|| headers.get("authorization"))
         .map(|v| v.to_str().unwrap_or("").to_string())
-        .map(|k| if k.len() > 12 { format!("{}***{}", &k[..8], &k[k.len() - 4..]) } else { "***".to_string() })
+        .map(|k| {
+            if k.len() > 12 {
+                format!("{}***{}", &k[..8], &k[k.len() - 4..])
+            } else {
+                "***".to_string()
+            }
+        })
         .unwrap_or_default();
     let client_ip = headers
         .get("x-forwarded-for")
@@ -1811,7 +2421,10 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
     let sys_prefix = build_system_prefix(&st, &mem_query).await;
     if !sys_prefix.trim().is_empty() {
         if let Some(messages) = up_body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-            messages.insert(0, serde_json::json!({ "role": "system", "content": sys_prefix }));
+            messages.insert(
+                0,
+                serde_json::json!({ "role": "system", "content": sys_prefix }),
+            );
         }
     }
     let mut effort_downgraded: Option<String> = None;
@@ -1852,12 +2465,54 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
         }
     }
     // 流式请求：向上游显式申请 usage 帧（真实 token 统计所需；非流式响应本身含 usage）
-    if up_body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if up_body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         up_body["stream_options"] = serde_json::json!({ "include_usage": true });
     }
 
     // 请求级重试循环：失败换号重试。
     // 此时尚未向客户端写出任何字节，天然满足 committed 边界（首字节后绝不重试）。
+    // v0.8 双桶并发信号量：在首字节写出前 acquire（免费/订阅各一个桶），
+    // 防止多账号高并发撞上游并发墙被风控。超时 2s → 429 语义（对齐 waiting_room）。
+    let tier_is_sub = {
+        let accounts = st.pool.accounts.lock().await;
+        accounts
+            .iter()
+            .any(|a| crate::semaphore::is_subscriber_token(&a.token, None))
+    };
+    // 持有信号量 guard 到函数返回：RAII 自动归还（Drop），保证并发墙计数覆盖整个请求窗口。
+    // 流式路径在后台上游 stream 消耗期间仍持有（函数返回后经 move 进任务的 guard 继续生效）。
+    let tier_guard = match st.semaphore.acquire(tier_is_sub).await {
+        Ok(g) => g,
+        Err(_) => {
+            let latency = start.elapsed().as_millis() as i64;
+            st.usage
+                .record_ex("", &model, 0, 0, latency, 429, "", "", &req_id)
+                .ok();
+            st.telemetry.event(
+                &req_id,
+                "concurrency_busy",
+                &format!(
+                    "并发桶已满（{} 层）",
+                    if tier_is_sub { "订阅" } else { "免费" }
+                ),
+            );
+            st.logs.emit(
+                "warn",
+                "request",
+                Some(&req_id),
+                format!("{model} 并发桶已满，返回 429（请稍后重试）"),
+            );
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": { "message": "too many concurrent requests to upstream, retry later", "type": "server_error", "code": "concurrency_busy" } })),
+            )
+                .into_response();
+        }
+    };
     let retry_policy = crate::retry::RetryPolicy::default();
     let mut account_name = String::new();
     let mut token = String::new();
@@ -1887,10 +2542,23 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
         account_name = account.name.clone();
         token = account.token.clone();
         if attempt == 0 {
-            st.telemetry.event(&req_id, "route", &format!("{requested} -> {model} via {account_name}"));
+            st.telemetry.event(
+                &req_id,
+                "route",
+                &format!("{requested} -> {model} via {account_name}"),
+            );
         } else {
-            st.telemetry.event(&req_id, "retry", &format!("第 {} 次尝试 via {account_name}", attempt + 1));
-            st.logs.emit("warn", "retry", Some(&req_id), format!("换号重试（第 {} 次）→ {account_name}", attempt + 1));
+            st.telemetry.event(
+                &req_id,
+                "retry",
+                &format!("第 {} 次尝试 via {account_name}", attempt + 1),
+            );
+            st.logs.emit(
+                "warn",
+                "retry",
+                Some(&req_id),
+                format!("换号重试（第 {} 次）→ {account_name}", attempt + 1),
+            );
         }
 
         // 确保会话
@@ -1899,14 +2567,18 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
             Err(e) => {
                 let msg = e.to_string();
                 if msg.starts_with("waiting_room_queued") {
-                    st.usage.record_ex(&account_name, &model, 0, 0, 0, 429, "", "", &req_id).ok();
+                    st.usage
+                        .record_ex(&account_name, &model, 0, 0, 0, 429, "", "", &req_id)
+                        .ok();
                     return (
                         StatusCode::SERVICE_UNAVAILABLE,
                         Json(serde_json::json!({ "error": { "message": msg, "type": "server_error", "code": "waiting_room_queued" } })),
                     )
                         .into_response();
                 }
-                st.pool.mark_failure(&account_name, &format!("session: {msg}")).await;
+                st.pool
+                    .mark_failure(&account_name, &format!("session: {msg}"))
+                    .await;
                 st.pool.update_score(&account_name, -30.0).await;
                 last_status = 502;
                 last_error = format!("failed to acquire free session: {msg}");
@@ -1941,20 +2613,34 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
                 let body_text = r.text().await.unwrap_or_default();
                 // 错误分类：文本规则优先（waiting_room/rate_limit/model_unavailable...），状态码兜底
                 let kind = crate::errors::classify(code, &body_text);
-                st.pool.mark_failure(&account_name, &format!("HTTP {code}")).await;
+                st.pool
+                    .mark_failure(&account_name, &format!("HTTP {code}"))
+                    .await;
                 st.pool.update_score(&account_name, -20.0).await;
                 if code == 401 || code == 403 {
                     st.pool
-                        .mark_cooldown(&account_name, std::time::Duration::from_secs(600), &format!("上游 {code}，token 疑似失效"))
+                        .mark_cooldown(
+                            &account_name,
+                            std::time::Duration::from_secs(600),
+                            &format!("上游 {code}，token 疑似失效"),
+                        )
                         .await;
                 }
                 last_status = code;
-                last_error = format!("upstream HTTP {code} ({}): {}", kind.as_str(), crate::errors::error_excerpt(&body_text));
+                last_error = format!(
+                    "upstream HTTP {code} ({}): {}",
+                    kind.as_str(),
+                    crate::errors::error_excerpt(&body_text)
+                );
                 // 换号判定：可重试错误（限流/排队/5xx/网络）+ 凭证失效（401/403 已冷却，换号继续）都换号
-                let should_switch = kind.is_retryable()
-                    || matches!(kind, crate::errors::ErrorKind::AuthExpired);
+                let should_switch =
+                    kind.is_retryable() || matches!(kind, crate::errors::ErrorKind::AuthExpired);
                 if should_switch && attempt + 1 < retry_policy.max_attempts {
-                    st.telemetry.event(&req_id, "retry_scheduled", &format!("HTTP {code}（{}），换号重试", kind.as_str()));
+                    st.telemetry.event(
+                        &req_id,
+                        "retry_scheduled",
+                        &format!("HTTP {code}（{}），换号重试", kind.as_str()),
+                    );
                     continue;
                 }
                 break;
@@ -1974,7 +2660,19 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
         Some(r) => r,
         None => {
             let latency = start.elapsed().as_millis() as i64;
-            st.usage.record_ex(&account_name, &model, 0, 0, latency, last_status as i64, "", "", &req_id).ok();
+            st.usage
+                .record_ex(
+                    &account_name,
+                    &model,
+                    0,
+                    0,
+                    latency,
+                    last_status as i64,
+                    "",
+                    "",
+                    &req_id,
+                )
+                .ok();
             st.telemetry.record(TraceRow {
                 req_id: req_id.clone(),
                 endpoint: "/v1/chat/completions".into(),
@@ -1987,14 +2685,28 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 stream: false,
-                error_kind: Some(crate::errors::classify(last_status, &last_error).as_str().to_string()),
+                error_kind: Some(
+                    crate::errors::classify(last_status, &last_error)
+                        .as_str()
+                        .to_string(),
+                ),
                 error_excerpt: Some(last_error.chars().take(300).collect()),
-                route_reason: Some(format!("{} -> {}（{} 次尝试均失败）", requested, model, attempt_count)),
+                route_reason: Some(format!(
+                    "{} -> {}（{} 次尝试均失败）",
+                    requested, model, attempt_count
+                )),
                 api_key: Some(api_key.clone()),
                 client_ip: Some(client_ip.clone()),
             });
-            st.logs
-                .emit("error", "request", Some(&req_id), format!("{model} 全部 {attempt_count} 次尝试失败: {}", last_error.chars().take(120).collect::<String>()));
+            st.logs.emit(
+                "error",
+                "request",
+                Some(&req_id),
+                format!(
+                    "{model} 全部 {attempt_count} 次尝试失败: {}",
+                    last_error.chars().take(120).collect::<String>()
+                ),
+            );
             // 有上游 HTTP 响应（非网络类失败）：透传上游状态码，保持客户端重试/退避语义
             if (400..600).contains(&last_status) {
                 return (
@@ -2025,32 +2737,58 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
     // （api_key / client_ip 已在重试循环前计算）
     // 观察（零 LLM）：模型使用偏好 / 档位降级 / 用户纠正信号 → 记忆库（运行时开关关闭时不记录）
     if memory_enabled_now(&st) {
-        let _ = st.memory.observe(&model, effort_downgraded.as_deref(), &mem_query, None);
+        let _ = st
+            .memory
+            .observe(&model, effort_downgraded.as_deref(), &mem_query, None);
     }
 
     if status.is_success() {
         st.pool.update_score(&account_name, 10.0).await;
         st.pool.mark_success(&account_name).await; // 熔断器：驱动 HalfOpen → Closed 恢复
-        st.telemetry.event(&req_id, "upstream_ok", &format!("HTTP {} 建连 {}ms", status.as_u16(), latency_ms));
+        st.telemetry.event(
+            &req_id,
+            "upstream_ok",
+            &format!("HTTP {} 建连 {}ms", status.as_u16(), latency_ms),
+        );
         // run 收尾：FINISH 上报（释放上游 run 计数；失败不影响响应）
         if let Err(e) = st.client.finish_run(&token, &run_id, 1).await {
             tracing::debug!("finish_run 失败（不影响响应）: {e}");
         }
-        st.logs.emit("info", "request", Some(&req_id), format!("{model} 上游 200，准备转发（{latency_ms}ms 建连）"));
+        st.logs.emit(
+            "info",
+            "request",
+            Some(&req_id),
+            format!("{model} 上游 200，准备转发（{latency_ms}ms 建连）"),
+        );
     } else {
         st.usage
-            .record_ex(&account_name, &model, 0, 0, latency_ms, status.as_u16() as i64, &api_key, &client_ip, &req_id)
+            .record_ex(
+                &account_name,
+                &model,
+                0,
+                0,
+                latency_ms,
+                status.as_u16() as i64,
+                &api_key,
+                &client_ip,
+                &req_id,
+            )
             .ok();
         st.pool.update_score(&account_name, -20.0).await;
         // 上游 401/403 = token 失效 → 冷却熔断该账号（此前 mark_cooldown 为死代码，此处接线）
         let code = status.as_u16();
         if code == 401 || code == 403 {
             st.pool
-                .mark_cooldown(&account_name, std::time::Duration::from_secs(600), &format!("上游 {code}，token 疑似失效"))
+                .mark_cooldown(
+                    &account_name,
+                    std::time::Duration::from_secs(600),
+                    &format!("上游 {code}，token 疑似失效"),
+                )
                 .await;
         }
         let kind = crate::retry::classify_status(code).as_str();
-        st.telemetry.event(&req_id, "upstream_error", &format!("HTTP {code} ({kind})"));
+        st.telemetry
+            .event(&req_id, "upstream_error", &format!("HTTP {code} ({kind})"));
         st.telemetry.record(TraceRow {
             req_id: req_id.clone(),
             endpoint: "/v1/chat/completions".into(),
@@ -2069,7 +2807,19 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
             api_key: Some(api_key.clone()),
             client_ip: Some(client_ip.clone()),
         });
-        st.logs.emit("warn", "request", Some(&req_id), format!("上游 {code}（{kind}），账号 {account_name} 已扣分{}", if code == 401 || code == 403 { "并冷却 10 分钟" } else { "" }));
+        st.logs.emit(
+            "warn",
+            "request",
+            Some(&req_id),
+            format!(
+                "上游 {code}（{kind}），账号 {account_name} 已扣分{}",
+                if code == 401 || code == 403 {
+                    "并冷却 10 分钟"
+                } else {
+                    ""
+                }
+            ),
+        );
     }
 
     // 流式转发上游响应（真实增量透传 + 上游错误原样透传）
@@ -2083,7 +2833,10 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
     if !status.is_success() {
         let err_body = upstream_resp.bytes().await.unwrap_or_default();
         let err_text = String::from_utf8_lossy(&err_body).to_string();
-        tracing::warn!("[上游错误] {model} HTTP {status}: {}", err_text.chars().take(500).collect::<String>());
+        tracing::warn!(
+            "[上游错误] {model} HTTP {status}: {}",
+            err_text.chars().take(500).collect::<String>()
+        );
         return (
             status,
             Json(serde_json::json!({
@@ -2100,11 +2853,20 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
     }
 
     // 2xx：分流（非流式读全量解析 usage；流式 spawn 转发 + 旁路采集）
-    let is_stream = parsed.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_stream = parsed
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let telem = st.telemetry.clone();
     let logs = st.logs.clone();
     let usage_db = st.usage.clone();
-    let (rid, acc, mdl, key, ip) = (req_id.clone(), account_name.clone(), model.clone(), api_key.clone(), client_ip.clone());
+    let (rid, acc, mdl, key, ip) = (
+        req_id.clone(),
+        account_name.clone(),
+        model.clone(),
+        api_key.clone(),
+        client_ip.clone(),
+    );
     let route_reason = format!("{requested} -> {model}");
 
     if !is_stream {
@@ -2113,7 +2875,9 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
         // 上游可能在 HTTP 200 的 body 里返回错误码（free_mode_* 系列）——识别并视为上游错误
         if let Some(code) = upstream_body_error(&text) {
             let total_ms = start.elapsed().as_millis() as u64;
-            usage_db.record_ex(&acc, &mdl, 0, 0, total_ms as i64, 502, &key, &ip, &rid).ok();
+            usage_db
+                .record_ex(&acc, &mdl, 0, 0, total_ms as i64, 502, &key, &ip, &rid)
+                .ok();
             st.telemetry.event(&rid, "upstream_body_error", code);
             telem.record(TraceRow {
                 req_id: rid.clone(),
@@ -2133,7 +2897,12 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
                 api_key: Some(key.clone()),
                 client_ip: Some(ip.clone()),
             });
-            logs.emit("warn", "request", Some(&rid), format!("{mdl} 上游 200 但 body 含错误码 {code}"));
+            logs.emit(
+                "warn",
+                "request",
+                Some(&rid),
+                format!("{mdl} 上游 200 但 body 含错误码 {code}"),
+            );
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -2151,7 +2920,17 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
         let (pt, ct) = extract_usage(&text).unwrap_or((0, 0));
         let total_ms = start.elapsed().as_millis() as u64;
         usage_db
-            .record_ex(&acc, &mdl, pt as i64, ct as i64, total_ms as i64, 200, &key, &ip, &rid)
+            .record_ex(
+                &acc,
+                &mdl,
+                pt as i64,
+                ct as i64,
+                total_ms as i64,
+                200,
+                &key,
+                &ip,
+                &rid,
+            )
             .ok();
         telem.record(TraceRow {
             req_id: rid.clone(),
@@ -2171,13 +2950,26 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
             api_key: Some(key.clone()),
             client_ip: Some(ip.clone()),
         });
-        logs.emit("info", "request", Some(&rid), format!("{mdl} 完成 {}+{} tok（{:.2}s）", pt, ct, total_ms as f64 / 1000.0));
+        logs.emit(
+            "info",
+            "request",
+            Some(&rid),
+            format!(
+                "{mdl} 完成 {}+{} tok（{:.2}s）",
+                pt,
+                ct,
+                total_ms as f64 / 1000.0
+            ),
+        );
         return builder.body(Body::from(bytes)).unwrap().into_response();
     }
 
     // 流式：spawn 转发任务；旁路扫描 usage、记录首字节与总耗时
+    // 信号量 guard move 进任务：后台上游 stream 消耗期间持续持有（防新增并发叠加），
+    // 任务结束时 Drop 归还（覆盖整个流式窗口）。
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(16);
     tokio::spawn(async move {
+        let _tier_guard_keep = tier_guard; // 持有到任务结束；Drop 自动归还
         let t0 = std::time::Instant::now();
         let mut stream = upstream_resp.bytes_stream();
         let mut ttft: Option<u64> = None;
@@ -2227,7 +3019,17 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
         }
         let total_ms = latency_ms as u64 + t0.elapsed().as_millis() as u64;
         usage_db
-            .record_ex(&acc, &mdl, totals.0 as i64, totals.1 as i64, total_ms as i64, 200, &key, &ip, &rid)
+            .record_ex(
+                &acc,
+                &mdl,
+                totals.0 as i64,
+                totals.1 as i64,
+                total_ms as i64,
+                200,
+                &key,
+                &ip,
+                &rid,
+            )
             .ok();
         telem.record(TraceRow {
             req_id: rid.clone(),
@@ -2247,12 +3049,26 @@ async fn handle_chat_completions(State(st): State<AppState>, headers: HeaderMap,
             api_key: Some(key.clone()),
             client_ip: Some(ip.clone()),
         });
-        logs.emit("info", "request", Some(&rid), format!("{mdl} 流式完成 {}+{} tok（首字节 {}ms / 总 {:.2}s）", totals.0, totals.1, ttft.unwrap_or(0), total_ms as f64 / 1000.0));
+        logs.emit(
+            "info",
+            "request",
+            Some(&rid),
+            format!(
+                "{mdl} 流式完成 {}+{} tok（首字节 {}ms / 总 {:.2}s）",
+                totals.0,
+                totals.1,
+                ttft.unwrap_or(0),
+                total_ms as f64 / 1000.0
+            ),
+        );
     });
     let body_stream = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|item| (item, rx))
     });
-    builder.body(Body::from_stream(body_stream)).unwrap().into_response()
+    builder
+        .body(Body::from_stream(body_stream))
+        .unwrap()
+        .into_response()
 }
 
 async fn ensure_root_run(st: &AppState, account_name: &str, token: &str) -> anyhow::Result<String> {
@@ -2268,10 +3084,16 @@ async fn ensure_root_run(st: &AppState, account_name: &str, token: &str) -> anyh
 
 // ---------- Anthropic 兼容 ----------
 
-async fn handle_claude_messages(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_claude_messages(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let start = std::time::Instant::now();
+    let req_id = uuid::Uuid::new_v4().to_string();
     // 数据面 CSRF 防线（与 /v1/chat/completions 同理：拦恶意网页 text/plain 简单请求）
     if !origin_allowed(&headers) {
-        return admin_denied();
+        return origin_blocked();
     }
     let parsed: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -2293,7 +3115,11 @@ async fn handle_claude_messages(State(st): State<AppState>, headers: HeaderMap, 
             .into_response();
     }
 
-    let model = parsed.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    let model = parsed
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
     if model.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -2315,7 +3141,12 @@ async fn handle_claude_messages(State(st): State<AppState>, headers: HeaderMap, 
         if let Some((cookie, cred, cid)) = pick_web_cookie(&st) {
             if cookie.contains("session-token") {
                 // Claude messages → OpenAI messages 复用现有转换（含 system/blocks/tool_use）
-                let openai_msgs = claude_to_openai_messages(parsed.get("messages").cloned().unwrap_or(serde_json::json!([])));
+                let openai_msgs = claude_to_openai_messages(
+                    parsed
+                        .get("messages")
+                        .cloned()
+                        .unwrap_or(serde_json::json!([])),
+                );
                 let mut bridge_body = serde_json::json!({
                     "model": model,
                     "messages": openai_msgs,
@@ -2333,36 +3164,81 @@ async fn handle_claude_messages(State(st): State<AppState>, headers: HeaderMap, 
                     };
                     if !sys_text.is_empty() {
                         if let Some(msgs) = bridge_body["messages"].as_array_mut() {
-                            msgs.insert(0, serde_json::json!({ "role": "system", "content": sys_text }));
+                            msgs.insert(
+                                0,
+                                serde_json::json!({ "role": "system", "content": sys_text }),
+                            );
                         }
                     }
                 }
-                let resp = web_bridge_openai(st, bridge_body, model.clone(), resolved.clone(), cookie, cred, cid).await;
+                let resp = web_bridge_openai(
+                    st,
+                    bridge_body,
+                    model.clone(),
+                    resolved.clone(),
+                    cookie,
+                    cred,
+                    cid,
+                )
+                .await;
                 // OpenAI 形状的错误体 → Claude 形状
                 return openai_error_to_claude(resp, &resolved).await;
             }
         }
     }
 
-    let account = match st.pool.pick_best().await {
-        Some(a) => a,
-        None => {
+    // v0.8 双桶并发信号量（Claude 路径与 OpenAI 一致）：首字节写出前 acquire。
+    // 保守判定：账号池任一凭证含订阅特征走订阅桶。
+    let claude_is_sub = {
+        let accounts = st.pool.accounts.lock().await;
+        accounts
+            .iter()
+            .any(|a| crate::semaphore::is_subscriber_token(&a.token, None))
+    };
+    let claude_tier_guard = match st.semaphore.acquire(claude_is_sub).await {
+        Ok(g) => g,
+        Err(_) => {
+            let latency = start.elapsed().as_millis() as i64;
+            st.usage
+                .record_ex("", &resolved, 0, 0, latency, 429, "", "", &req_id)
+                .ok();
+            st.telemetry.event(
+                &req_id,
+                "concurrency_busy",
+                &format!(
+                    "Claude 并发桶已满（{} 层）",
+                    if claude_is_sub { "订阅" } else { "免费" }
+                ),
+            );
+            st.logs.emit(
+                "warn",
+                "request",
+                Some(&req_id),
+                format!("{resolved} Claude 并发桶已满，返回 429"),
+            );
             return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "type": "error", "error": { "type": "api_error", "message": "no healthy token" } })),
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "type": "error", "error": { "type": "api_error", "message": "too many concurrent requests to upstream, retry later", "code": "concurrency_busy" } })),
             )
                 .into_response();
         }
     };
-    let token = account.token.clone();
-    let _ = account.session.ensure_session(&resolved).await;
 
     // Claude → OpenAI 协议转换：system 提取、messages content blocks 打平、max_tokens 映射
-    let openai_messages = claude_to_openai_messages(parsed.get("messages").cloned().unwrap_or(serde_json::json!([])));
+    let openai_messages = claude_to_openai_messages(
+        parsed
+            .get("messages")
+            .cloned()
+            .unwrap_or(serde_json::json!([])),
+    );
+    let wants_stream = parsed
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let mut up_body = serde_json::json!({
         "model": resolved,
         "messages": openai_messages,
-        "stream": parsed.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
+        "stream": wants_stream,
     });
     if let Some(maxt) = parsed.get("max_tokens").and_then(|v| v.as_u64()) {
         up_body["max_tokens"] = serde_json::json!(maxt);
@@ -2380,42 +3256,322 @@ async fn handle_claude_messages(State(st): State<AppState>, headers: HeaderMap, 
         };
         if !sys_text.is_empty() {
             if let Some(msgs) = up_body["messages"].as_array_mut() {
-                msgs.insert(0, serde_json::json!({ "role": "system", "content": sys_text }));
+                msgs.insert(
+                    0,
+                    serde_json::json!({ "role": "system", "content": sys_text }),
+                );
+            }
+        }
+    }
+    // 记忆检索 query（最后一条 user 消息）
+    let claude_mem_query: String = parsed
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .and_then(|m| m.get("content"))
+                .map(|c| match c {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+        })
+        .unwrap_or_default()
+        .chars()
+        .take(200)
+        .collect();
+    // 记账/遥测字段（api_key 脱敏；client_ip）
+    let claude_api_key = headers
+        .get("x-api-key")
+        .or_else(|| headers.get("authorization"))
+        .map(|v| v.to_str().unwrap_or("").to_string())
+        .map(|k| {
+            if k.len() > 12 {
+                format!("{}***{}", &k[..8], &k[k.len() - 4..])
+            } else {
+                "***".to_string()
+            }
+        })
+        .unwrap_or_default();
+    let claude_client_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or("").to_string())
+        .unwrap_or_default();
+    let start_claude = start;
+
+    // v0.8 重试循环（与 OpenAI 路径同策略）：失败换号重试 + 排队 503 + 5xx 换号。
+    let retry_policy = crate::retry::RetryPolicy::default();
+    #[allow(unused_assignments)]
+    let mut claude_account_name = String::new();
+    #[allow(unused_assignments)]
+    let mut claude_token = String::new();
+    #[allow(unused_assignments)]
+    let mut claude_run_id = String::new();
+    let mut claude_attempts = 0usize;
+    let mut claude_last_error = String::new();
+    let mut claude_last_status: u16 = 502;
+    let mut claude_upstream: Option<reqwest::Response> = None;
+
+    for attempt in 0..retry_policy.max_attempts {
+        claude_attempts = attempt + 1;
+        let account = match st.pool.pick_best().await {
+            Some(a) => a,
+            None => {
+                if attempt == 0 {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({ "type": "error", "error": { "type": "api_error", "message": "no healthy token" } })),
+                    )
+                        .into_response();
+                }
+                claude_last_error = "no healthy token".into();
+                break;
+            }
+        };
+        claude_account_name = account.name.clone();
+        claude_token = account.token.clone();
+        if attempt == 0 {
+            st.telemetry.event(
+                &req_id,
+                "route",
+                &format!("{model} -> {resolved} via {}", account.name),
+            );
+        } else {
+            st.telemetry.event(
+                &req_id,
+                "retry",
+                &format!("Claude 第 {} 次尝试 via {}", attempt + 1, account.name),
+            );
+            st.logs.emit(
+                "warn",
+                "retry",
+                Some(&req_id),
+                format!("Claude 换号重试（第 {} 次）→ {}", attempt + 1, account.name),
+            );
+        }
+
+        // 确保会话（不再吞错：排队/失败进入换号或 503）
+        let instance_id = match account.session.ensure_session(&resolved).await {
+            Ok(id) => Some(id),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.starts_with("waiting_room_queued") {
+                    st.usage
+                        .record_ex(&account.name, &resolved, 0, 0, 0, 503, "", "", &req_id)
+                        .ok();
+                    st.telemetry.event(&req_id, "waiting_room", &msg);
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "type": "error",
+                            "error": { "type": "overloaded_error", "message": msg, "code": "waiting_room_queued" }
+                        })),
+                    )
+                        .into_response();
+                }
+                st.pool
+                    .mark_failure(&account.name, &format!("session: {msg}"))
+                    .await;
+                st.pool.update_score(&account.name, -30.0).await;
+                claude_last_status = 502;
+                claude_last_error = format!("failed to acquire free session: {msg}");
+                continue;
+            }
+        };
+
+        // run 管理（惰性建根 run）
+        let rid = match ensure_root_run(&st, &account.name, &claude_token).await {
+            Ok(id) => id,
+            Err(e) => {
+                st.pool.mark_failure(&account.name, "run").await;
+                claude_last_status = 502;
+                claude_last_error = format!("create run failed: {e}");
+                continue;
+            }
+        };
+        claude_run_id = rid;
+
+        // 调上游
+        match st
+            .client
+            .chat_completions(
+                &claude_token,
+                up_body.clone(),
+                &claude_run_id,
+                instance_id.as_deref(),
+            )
+            .await
+        {
+            Ok(r) if r.status().is_success() => {
+                claude_upstream = Some(r);
+                break;
+            }
+            Ok(r) => {
+                let code = r.status().as_u16();
+                let body_text = r.text().await.unwrap_or_default();
+                let kind = crate::errors::classify(code, &body_text);
+                st.pool
+                    .mark_failure(&account.name, &format!("HTTP {code}"))
+                    .await;
+                st.pool.update_score(&account.name, -20.0).await;
+                if code == 401 || code == 403 {
+                    st.pool
+                        .mark_cooldown(
+                            &account.name,
+                            std::time::Duration::from_secs(600),
+                            &format!("上游 {code}，token 疑似失效"),
+                        )
+                        .await;
+                }
+                claude_last_status = code;
+                claude_last_error = format!(
+                    "upstream HTTP {code} ({}): {}",
+                    kind.as_str(),
+                    crate::errors::error_excerpt(&body_text)
+                );
+                let should_switch =
+                    kind.is_retryable() || matches!(kind, crate::errors::ErrorKind::AuthExpired);
+                if should_switch && attempt + 1 < retry_policy.max_attempts {
+                    st.telemetry.event(
+                        &req_id,
+                        "retry_scheduled",
+                        &format!("Claude HTTP {code}（{}），换号重试", kind.as_str()),
+                    );
+                    continue;
+                }
+                break;
+            }
+            Err(e) => {
+                st.pool.mark_failure(&account.name, "network").await;
+                st.pool.update_score(&account.name, -40.0).await;
+                claude_last_status = 502;
+                claude_last_error = e.to_string();
+                continue;
             }
         }
     }
 
-    let run_id = match ensure_root_run(&st, &account.name, &token).await {
-        Ok(id) => id,
-        Err(_) => "no-run".into(),
-    };
-
-    let upstream_resp = match st
-        .client
-        .chat_completions(&token, up_body, &run_id, None)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
+    // 全部尝试失败：Claude 形状错误响应（保留 503/5xx 可读消息）
+    let upstream_resp = match claude_upstream {
+        Some(r) => r,
+        None => {
+            let latency = start_claude.elapsed().as_millis() as i64;
+            st.usage
+                .record_ex(
+                    &claude_account_name,
+                    &resolved,
+                    0,
+                    0,
+                    latency,
+                    claude_last_status as i64,
+                    "",
+                    "",
+                    &req_id,
+                )
+                .ok();
+            st.telemetry.record(TraceRow {
+                req_id: req_id.clone(),
+                endpoint: "/v1/messages".into(),
+                requested_model: model.clone(),
+                resolved_model: resolved.clone(),
+                account: claude_account_name.clone(),
+                status: claude_last_status,
+                latency_ms: latency as u64,
+                ttft_ms: None,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                stream: wants_stream,
+                error_kind: Some(
+                    crate::errors::classify(claude_last_status, &claude_last_error)
+                        .as_str()
+                        .to_string(),
+                ),
+                error_excerpt: Some(claude_last_error.chars().take(300).collect()),
+                route_reason: Some(format!(
+                    "{} -> {}（{} 次尝试均失败）",
+                    model, resolved, claude_attempts
+                )),
+                api_key: Some(claude_api_key.clone()),
+                client_ip: Some(claude_client_ip.clone()),
+            });
+            st.logs.emit(
+                "error",
+                "request",
+                Some(&req_id),
+                format!(
+                    "{resolved} Claude 全部 {claude_attempts} 次尝试失败: {}",
+                    claude_last_error.chars().take(120).collect::<String>()
+                ),
+            );
+            if (400..600).contains(&claude_last_status) {
+                return (
+                    StatusCode::from_u16(claude_last_status).unwrap_or(StatusCode::BAD_GATEWAY),
+                    Json(serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": claude_last_error,
+                            "code": crate::errors::classify(claude_last_status, &claude_last_error).as_str(),
+                            "model": resolved,
+                            "attempts": claude_attempts,
+                        }
+                    })),
+                )
+                    .into_response();
+            }
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "type": "error", "error": { "type": "api_error", "message": e.to_string() } })),
+                Json(serde_json::json!({ "type": "error", "error": { "type": "api_error", "message": format!("all {claude_attempts} attempts failed: {claude_last_error}") } })),
             )
                 .into_response();
         }
     };
 
     let status = upstream_resp.status();
+    let claude_latency_ms = start_claude.elapsed().as_millis() as i64;
+    // 记忆 observe（Claude 路径补齐）：运行时开关开启时记录偏好/降级/纠正
+    if memory_enabled_now(&st) {
+        let _ = st.memory.observe(&resolved, None, &claude_mem_query, None);
+    }
     // 非 2xx：转 Claude 错误格式透传
     if !status.is_success() {
         let err_body = upstream_resp.bytes().await.unwrap_or_default();
         let err_text = String::from_utf8_lossy(&err_body).to_string();
-        tracing::warn!("[上游错误/Claude] HTTP {status}: {}", err_text.chars().take(500).collect::<String>());
+        let kind = crate::errors::classify(status.as_u16(), &err_text);
+        st.usage
+            .record_ex(
+                &claude_account_name,
+                &resolved,
+                0,
+                0,
+                claude_latency_ms,
+                status.as_u16() as i64,
+                &claude_api_key,
+                &claude_client_ip,
+                &req_id,
+            )
+            .ok();
+        st.pool.update_score(&claude_account_name, -20.0).await;
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            st.pool
+                .mark_cooldown(
+                    &claude_account_name,
+                    std::time::Duration::from_secs(600),
+                    &format!("上游 {status}，token 疑似失效"),
+                )
+                .await;
+        }
+        tracing::warn!(
+            "[上游错误/Claude] HTTP {status}: {}",
+            err_text.chars().take(500).collect::<String>()
+        );
         return (
             status,
             Json(serde_json::json!({
                 "type": "error",
-                "error": { "type": "api_error", "message": err_text }
+                "error": { "type": "api_error", "message": err_text, "kind": kind.as_str() }
             })),
         )
             .into_response();
@@ -2427,25 +3583,30 @@ async fn handle_claude_messages(State(st): State<AppState>, headers: HeaderMap, 
         }
     }
     // 非流式：把 OpenAI 响应转换回 Claude 格式（message + content blocks + stop_reason）
-    let wants_stream = parsed.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     if wants_stream {
         // 流式：OpenAI SSE → canonical event → Anthropic 事件流（不再直接透传）
-        let claude_req_id = uuid::Uuid::new_v4().to_string();
+        // 复用请求级 req_id（事件链完整关联：usage/telemetry/logs 同一 ID）
+        let claude_req_id = req_id.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(16);
         let model_for_render = resolved.clone();
         let telem = st.telemetry.clone();
         let logs = st.logs.clone();
-        let (rid, acc, mdl, req_model) = (claude_req_id.clone(), account.name.clone(), resolved.clone(), model.clone());
-        let key = headers
-            .get("x-api-key")
-            .or_else(|| headers.get("authorization"))
-            .map(|v| v.to_str().unwrap_or("").to_string())
-            .map(|k| if k.len() > 12 { format!("{}***{}", &k[..8], &k[k.len() - 4..]) } else { "***".to_string() })
-            .unwrap_or_default();
+        let usage_db = st.usage.clone();
+        let (rid, acc, mdl, req_model) = (
+            claude_req_id.clone(),
+            claude_account_name.clone(),
+            resolved.clone(),
+            model.clone(),
+        );
+        let claude_key = claude_api_key.clone();
+        let claude_ip = claude_client_ip.clone();
         let t_start = std::time::Instant::now();
         tokio::spawn(async move {
+            // 信号量 guard move 进任务：流式消耗期间持有并发 permit，任务结束 Drop 归还
+            let _claude_tier_keep = claude_tier_guard;
             let mut decoder = crate::protocol::openai_sse::OpenAiSseDecoder::new();
-            let mut renderer = crate::protocol::anthropic_sse::AnthropicSseRenderer::new(&model_for_render);
+            let mut renderer =
+                crate::protocol::anthropic_sse::AnthropicSseRenderer::new(&model_for_render);
             let mut stream = upstream_resp.bytes_stream();
             let mut ttft: Option<u64> = None;
             let mut totals: (u64, u64) = (0, 0);
@@ -2459,20 +3620,30 @@ async fn handle_claude_messages(State(st): State<AppState>, headers: HeaderMap, 
                         let events = decoder.feed(&b);
                         let mut out = String::new();
                         for ev in &events {
-                            if let crate::protocol::stream::CanonicalEvent::Usage { input_tokens, output_tokens } = ev {
+                            if let crate::protocol::stream::CanonicalEvent::Usage {
+                                input_tokens,
+                                output_tokens,
+                            } = ev
+                            {
                                 totals = (*input_tokens, *output_tokens);
                             }
                             for frame in renderer.render(ev) {
                                 out.push_str(&frame);
                             }
                         }
-                        if !out.is_empty() && tx.send(Ok(axum::body::Bytes::from(out))).await.is_err() {
+                        if !out.is_empty()
+                            && tx.send(Ok(axum::body::Bytes::from(out))).await.is_err()
+                        {
                             break; // 客户端断开
                         }
                     }
                     Err(e) => {
                         err_text = Some(e.to_string());
-                        let frames = renderer.render(&crate::protocol::stream::CanonicalEvent::Error(e.to_string())).join("");
+                        let frames = renderer
+                            .render(&crate::protocol::stream::CanonicalEvent::Error(
+                                e.to_string(),
+                            ))
+                            .join("");
                         let _ = tx.send(Ok(axum::body::Bytes::from(frames))).await;
                         break;
                     }
@@ -2491,6 +3662,20 @@ async fn handle_claude_messages(State(st): State<AppState>, headers: HeaderMap, 
             }
             let total_ms = t_start.elapsed().as_millis() as u64;
             let status = if err_text.is_some() { 502u16 } else { 200 };
+            // v0.8 补记账：Claude 流式成功路径 usage 落库（此前只遥测不落库）
+            usage_db
+                .record_ex(
+                    &acc,
+                    &mdl,
+                    totals.0 as i64,
+                    totals.1 as i64,
+                    total_ms as i64,
+                    status as i64,
+                    &claude_key,
+                    &claude_ip,
+                    &rid,
+                )
+                .ok();
             telem.record(TraceRow {
                 req_id: rid.clone(),
                 endpoint: "/v1/messages".into(),
@@ -2506,10 +3691,20 @@ async fn handle_claude_messages(State(st): State<AppState>, headers: HeaderMap, 
                 error_kind: err_text.as_ref().map(|_| "network".to_string()),
                 error_excerpt: err_text.map(|t| t.chars().take(300).collect()),
                 route_reason: None,
-                api_key: Some(key),
-                client_ip: None,
+                api_key: Some(claude_key),
+                client_ip: Some(claude_ip),
             });
-            logs.emit(if status == 200 { "info" } else { "error" }, "request", Some(&rid), format!("{mdl} Claude 流式完成 {}+{} tok（{:.2}s）", totals.0, totals.1, total_ms as f64 / 1000.0));
+            logs.emit(
+                if status == 200 { "info" } else { "error" },
+                "request",
+                Some(&rid),
+                format!(
+                    "{mdl} Claude 流式完成 {}+{} tok（{:.2}s）",
+                    totals.0,
+                    totals.1,
+                    total_ms as f64 / 1000.0
+                ),
+            );
         });
         let body_stream = futures::stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
@@ -2522,7 +3717,54 @@ async fn handle_claude_messages(State(st): State<AppState>, headers: HeaderMap, 
             .into_response()
     } else {
         let bytes = upstream_resp.bytes().await.unwrap_or_default();
-        let openai_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let openai_resp: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+        // v0.8 补记账：Claude 非流式成功路径 usage/遥测落库（此前直接 Json 返回）
+        let (pt, ct) = extract_usage(&text).unwrap_or((0, 0));
+        let total_ms = start_claude.elapsed().as_millis() as u64;
+        st.usage
+            .record_ex(
+                &claude_account_name,
+                &resolved,
+                pt as i64,
+                ct as i64,
+                total_ms as i64,
+                200,
+                &claude_api_key,
+                &claude_client_ip,
+                &req_id,
+            )
+            .ok();
+        st.telemetry.record(TraceRow {
+            req_id: req_id.clone(),
+            endpoint: "/v1/messages".into(),
+            requested_model: model.clone(),
+            resolved_model: resolved.clone(),
+            account: claude_account_name.clone(),
+            status: 200,
+            latency_ms: total_ms,
+            ttft_ms: None,
+            prompt_tokens: pt,
+            completion_tokens: ct,
+            stream: false,
+            error_kind: None,
+            error_excerpt: None,
+            route_reason: Some(format!("{} -> {}", model, resolved)),
+            api_key: Some(claude_api_key.clone()),
+            client_ip: Some(claude_client_ip.clone()),
+        });
+        st.logs.emit(
+            "info",
+            "request",
+            Some(&req_id),
+            format!(
+                "{resolved} Claude 完成 {}+{} tok（{:.2}s）",
+                pt,
+                ct,
+                total_ms as f64 / 1000.0
+            ),
+        );
         let claude_resp = openai_to_claude_response(&openai_resp, &resolved);
         (StatusCode::OK, Json(claude_resp)).into_response()
     }
@@ -2535,10 +3777,16 @@ fn claude_to_openai_messages(messages: serde_json::Value) -> serde_json::Value {
     let arr = messages.as_array().cloned().unwrap_or_default();
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(arr.len());
     for m in arr {
-        let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("user").to_string();
+        let role = m
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("user")
+            .to_string();
         let content = m.get("content").cloned().unwrap_or(serde_json::json!(""));
         match content {
-            serde_json::Value::String(s) => out.push(serde_json::json!({ "role": role, "content": s })),
+            serde_json::Value::String(s) => {
+                out.push(serde_json::json!({ "role": role, "content": s }))
+            }
             serde_json::Value::Array(blocks) => {
                 let mut text_parts: Vec<String> = Vec::new();
                 let mut tool_calls: Vec<serde_json::Value> = Vec::new();
@@ -2601,7 +3849,10 @@ fn claude_to_openai_messages(messages: serde_json::Value) -> serde_json::Value {
 
 /// OpenAI chat 响应 → Claude messages 响应（非流式）
 fn openai_to_claude_response(openai: &serde_json::Value, model: &str) -> serde_json::Value {
-    let choice = openai.get("choices").and_then(|c| c.as_array()).and_then(|c| c.first());
+    let choice = openai
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first());
     let message = choice.and_then(|c| c.get("message"));
     let mut blocks: Vec<serde_json::Value> = Vec::new();
     let mut tool_calls_out: Vec<serde_json::Value> = Vec::new();
@@ -2614,9 +3865,17 @@ fn openai_to_claude_response(openai: &serde_json::Value, model: &str) -> serde_j
         if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
             for tc in tcs {
                 let fn_obj = tc.get("function");
-                let name = fn_obj.and_then(|f| f.get("name")).and_then(|n| n.as_str()).unwrap_or("").to_string();
-                let args_raw = fn_obj.and_then(|f| f.get("arguments")).and_then(|a| a.as_str()).unwrap_or("{}");
-                let input: serde_json::Value = serde_json::from_str(args_raw).unwrap_or(serde_json::json!({}));
+                let name = fn_obj
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args_raw = fn_obj
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("{}");
+                let input: serde_json::Value =
+                    serde_json::from_str(args_raw).unwrap_or(serde_json::json!({}));
                 tool_calls_out.push(serde_json::json!({
                     "type": "tool_use",
                     "id": tc.get("id").cloned().unwrap_or(serde_json::json!("toolu_unknown")),
@@ -2633,7 +3892,10 @@ fn openai_to_claude_response(openai: &serde_json::Value, model: &str) -> serde_j
         blocks.push(tc);
     }
     // stop_reason 映射
-    let finish = choice.and_then(|c| c.get("finish_reason")).and_then(|f| f.as_str()).unwrap_or("end_turn");
+    let finish = choice
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|f| f.as_str())
+        .unwrap_or("end_turn");
     let stop_reason = match finish {
         "stop" => "end_turn",
         "length" => "max_tokens",
@@ -2641,8 +3903,14 @@ fn openai_to_claude_response(openai: &serde_json::Value, model: &str) -> serde_j
         _ => "end_turn",
     };
     let usage = openai.get("usage");
-    let input_tokens = usage.and_then(|u| u.get("prompt_tokens")).and_then(|t| t.as_i64()).unwrap_or(0);
-    let output_tokens = usage.and_then(|u| u.get("completion_tokens")).and_then(|t| t.as_i64()).unwrap_or(0);
+    let input_tokens = usage
+        .and_then(|u| u.get("prompt_tokens"))
+        .and_then(|t| t.as_i64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .and_then(|u| u.get("completion_tokens"))
+        .and_then(|t| t.as_i64())
+        .unwrap_or(0);
     serde_json::json!({
         "id": openai.get("id").cloned().unwrap_or(serde_json::json!("msg_freebuff")),
         "type": "message",
@@ -2679,7 +3947,11 @@ async fn handle_skills_list(State(st): State<AppState>, headers: HeaderMap) -> R
 }
 
 /// POST /api/skills — 新建/更新技能 body: { id?, name, description, body, triggers? }
-async fn handle_skills_upsert(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_skills_upsert(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -2689,13 +3961,29 @@ async fn handle_skills_upsert(State(st): State<AppState>, headers: HeaderMap, bo
     };
     let id = v.get("id").and_then(|x| x.as_str());
     let input = crate::skills::SkillInput {
-        name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        description: v.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        body: v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        name: v
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        description: v
+            .get("description")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        body: v
+            .get("body")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         triggers: v
             .get("triggers")
             .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default(),
     };
     if input.name.trim().is_empty() || input.description.trim().is_empty() {
@@ -2716,15 +4004,24 @@ async fn handle_skills_upsert(State(st): State<AppState>, headers: HeaderMap, bo
     match st.skills.upsert(id, input) {
         Ok(s) => {
             let gate = st.skills.gate(&s.body);
-            st.logs.emit("info", "skills", None, format!("技能已保存: {}", s.name));
+            st.logs
+                .emit("info", "skills", None, format!("技能已保存: {}", s.name));
             Json(serde_json::json!({ "ok": true, "skill": s, "gate": gate })).into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "message": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// POST /api/skills/toggle — body: { id, enabled }
-async fn handle_skills_toggle(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_skills_toggle(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -2735,13 +4032,23 @@ async fn handle_skills_toggle(State(st): State<AppState>, headers: HeaderMap, bo
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
     let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
     match st.skills.toggle(id, enabled) {
-        Ok(ok) => Json(serde_json::json!({ "ok": ok, "id": id, "enabled": enabled })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "message": e.to_string() }))).into_response(),
+        Ok(ok) => {
+            Json(serde_json::json!({ "ok": ok, "id": id, "enabled": enabled })).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// POST /api/skills/delete — body: { id }
-async fn handle_skills_delete(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_skills_delete(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -2752,12 +4059,20 @@ async fn handle_skills_delete(State(st): State<AppState>, headers: HeaderMap, bo
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
     match st.skills.delete(id) {
         Ok(ok) => Json(serde_json::json!({ "ok": ok, "id": id })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "message": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// POST /api/skills/gate — body: { body } 返回质量问题列表（空数组=通过）
-async fn handle_skills_gate(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_skills_gate(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if !admin_authorized(&headers, &st) {
         return admin_denied();
     }
@@ -2780,7 +4095,11 @@ struct LogsQuery {
 }
 
 /// GET /api/logs/recent?limit=200 — 最近日志（首屏加载）
-async fn handle_logs_recent(State(st): State<AppState>, headers: HeaderMap, Query(q): Query<LogsQuery>) -> Response {
+async fn handle_logs_recent(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<LogsQuery>,
+) -> Response {
     if !admin_authorized(&headers, &st) {
         return admin_denied();
     }
@@ -2791,7 +4110,11 @@ async fn handle_logs_recent(State(st): State<AppState>, headers: HeaderMap, Quer
 /// GET /api/logs/stream — 实时日志 SSE。
 /// - 支持 `?key=`（浏览器 EventSource 无法带头）
 /// - 支持 `Last-Event-ID` 请求头：断线重连时先补发错过的事件
-async fn handle_logs_stream(State(st): State<AppState>, headers: HeaderMap, Query(q): Query<LogsQuery>) -> Response {
+async fn handle_logs_stream(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<LogsQuery>,
+) -> Response {
     let keys = api_keys_of(&st);
     let query_key_ok = !keys.is_empty()
         && q.key
@@ -2854,9 +4177,16 @@ async fn handle_usage_request_detail(
                     read_telemetry_request(&st.cfg.telemetry_path, &rec.req_id),
                 )
             };
-            Json(serde_json::json!({ "ok": true, "request": rec, "trace": trace, "events": events })).into_response()
+            Json(
+                serde_json::json!({ "ok": true, "request": rec, "trace": trace, "events": events }),
+            )
+            .into_response()
         }
-        Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "ok": false, "message": "request not found" }))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "request not found" })),
+        )
+            .into_response(),
         Err(e) => internal_err(&e),
     }
 }
@@ -2870,7 +4200,9 @@ fn read_telemetry_events(db_path: &str, req_id: &str) -> Vec<serde_json::Value> 
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    let mut stmt = match conn.prepare("SELECT ts, kind, detail FROM events WHERE req_id = ?1 ORDER BY id DESC LIMIT 50") {
+    let mut stmt = match conn
+        .prepare("SELECT ts, kind, detail FROM events WHERE req_id = ?1 ORDER BY id DESC LIMIT 50")
+    {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -2889,11 +4221,9 @@ fn read_telemetry_events(db_path: &str, req_id: &str) -> Vec<serde_json::Value> 
 
 /// 读取遥测富记录（endpoint/ttft/error_kind 等；详情抽屉优先展示）
 fn read_telemetry_request(db_path: &str, req_id: &str) -> Option<serde_json::Value> {
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .ok()?;
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
     let mut stmt = conn
         .prepare("SELECT ts,endpoint,requested_model,resolved_model,account,status,latency_ms,ttft_ms,prompt_tokens,completion_tokens,stream,error_kind,error_excerpt,route_reason FROM requests_v2 WHERE req_id = ?1 ORDER BY id DESC LIMIT 1")
         .ok()?;
@@ -2980,7 +4310,9 @@ fn write_guard(headers: &HeaderMap, st: &AppState) -> Option<Response> {
         return Some(admin_denied());
     }
     if !json_write_ok(headers) {
-        return Some(bad_req("写操作要求 content-type: application/json（CSRF 防护）"));
+        return Some(bad_req(
+            "写操作要求 content-type: application/json（CSRF 防护）",
+        ));
     }
     None
 }
@@ -3055,7 +4387,11 @@ struct SweepOutcome {
 ///
 /// 用户批注（网页对话.txt:605）：反代必须自己清理上游会话，
 /// "以防止我们反代给上游制造压力等等的让上游查出来就完蛋了"。
-async fn sweep_threads(st: &AppState, max_age_hours: u64, dry_run: bool) -> anyhow::Result<SweepOutcome> {
+async fn sweep_threads(
+    st: &AppState,
+    max_age_hours: u64,
+    dry_run: bool,
+) -> anyhow::Result<SweepOutcome> {
     let all: Vec<serde_json::Value> = std::fs::read_to_string(&st.cfg.threads_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -3064,13 +4400,21 @@ async fn sweep_threads(st: &AppState, max_age_hours: u64, dry_run: bool) -> anyh
     let mut expired_ids: Vec<String> = Vec::new();
     let mut fresh: Vec<serde_json::Value> = Vec::new();
     for t in &all {
-        let id = t.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let id = t
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let created = t
             .get("created_at")
             .and_then(|x| x.as_str())
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
         let is_expired = match created {
-            Some(c) => now.signed_duration_since(c.with_timezone(&chrono::Utc)).num_hours() as u64 >= max_age_hours,
+            Some(c) => {
+                now.signed_duration_since(c.with_timezone(&chrono::Utc))
+                    .num_hours() as u64
+                    >= max_age_hours
+            }
             None => true, // 无时间戳视为可清理
         };
         if is_expired {
@@ -3119,7 +4463,10 @@ async fn sweep_threads(st: &AppState, max_age_hours: u64, dry_run: bool) -> anyh
             Err(e) => {
                 outcome.failed.push(id.clone());
                 tracing::debug!("删除会话 {id} 失败: {e}");
-                if let Some(orig) = all.iter().find(|t| t.get("id").and_then(|x| x.as_str()) == Some(id.as_str())) {
+                if let Some(orig) = all
+                    .iter()
+                    .find(|t| t.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+                {
                     still.push(orig.clone());
                 }
             }
@@ -3143,8 +4490,14 @@ async fn sweep_threads(st: &AppState, max_age_hours: u64, dry_run: bool) -> anyh
     });
     // 补回删除失败但快照里没有的（防御性，一般不会发生）
     for id in &outcome.failed {
-        if !final_list.iter().any(|t| t.get("id").and_then(|x| x.as_str()) == Some(id.as_str())) {
-            if let Some(orig) = all.iter().find(|t| t.get("id").and_then(|x| x.as_str()) == Some(id.as_str())) {
+        if !final_list
+            .iter()
+            .any(|t| t.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+        {
+            if let Some(orig) = all
+                .iter()
+                .find(|t| t.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+            {
                 final_list.push(orig.clone());
             }
         }
@@ -3172,18 +4525,28 @@ pub async fn thread_cleanup_loop(st: AppState) {
                 "info",
                 "cleanup",
                 None,
-                format!("自动清理：删除 {} 个过期会话（{} 个失败），剩余 {}", o.deleted, o.failed.len(), o.remaining),
+                format!(
+                    "自动清理：删除 {} 个过期会话（{} 个失败），剩余 {}",
+                    o.deleted,
+                    o.failed.len(),
+                    o.remaining
+                ),
             ),
             Err(e) => tracing::warn!("自动清理会话未执行: {e}"),
         }
     }
 }
 
-async fn handle_threads_cleanup(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_threads_cleanup(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|_| serde_json::json!({}));
+    let v: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or_else(|_| serde_json::json!({}));
     let dry_run = v.get("dry_run").and_then(|x| x.as_bool()).unwrap_or(true);
     let max_age_hours = v
         .get("max_age_hours")
@@ -3235,11 +4598,16 @@ async fn handle_memory_list(State(st): State<AppState>, headers: HeaderMap) -> R
         "memories": memories,
         "stats": stats,
         "enabled": memory_enabled_now(&st),
-    })).into_response()
+    }))
+    .into_response()
 }
 
 /// POST /api/memory — 手动新增记忆 body: {kind, title, content, is_static?}
-async fn handle_memory_upsert(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_memory_upsert(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -3247,7 +4615,10 @@ async fn handle_memory_upsert(State(st): State<AppState>, headers: HeaderMap, bo
         Ok(v) => v,
         Err(_) => return bad_req("invalid json"),
     };
-    let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("preference");
+    let kind = v
+        .get("kind")
+        .and_then(|x| x.as_str())
+        .unwrap_or("preference");
     let title: String = v
         .get("title")
         .and_then(|x| x.as_str())
@@ -3263,21 +4634,33 @@ async fn handle_memory_upsert(State(st): State<AppState>, headers: HeaderMap, bo
         .chars()
         .take(4000)
         .collect();
-    let is_static = v.get("is_static").and_then(|x| x.as_bool()).unwrap_or(false);
+    let is_static = v
+        .get("is_static")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     if title.is_empty() || content.trim().is_empty() {
         return bad_req("title 和 content 不能为空");
     }
     match st.memory.upsert(kind, &title, &content, is_static) {
         Ok(m) => {
-            st.logs.emit("info", "memory", None, format!("记忆已保存: {}", m.title));
+            st.logs
+                .emit("info", "memory", None, format!("记忆已保存: {}", m.title));
             Json(serde_json::json!({ "ok": true, "memory": m })).into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "message": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// POST /api/memory/delete — body: {id}
-async fn handle_memory_delete(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_memory_delete(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -3288,12 +4671,20 @@ async fn handle_memory_delete(State(st): State<AppState>, headers: HeaderMap, bo
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
     match st.memory.delete(id) {
         Ok(ok) => Json(serde_json::json!({ "ok": ok, "id": id })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "message": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// POST /api/memory/static — body: {id, is_static}
-async fn handle_memory_static(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_memory_static(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -3302,16 +4693,29 @@ async fn handle_memory_static(State(st): State<AppState>, headers: HeaderMap, bo
         Err(_) => return bad_req("invalid json"),
     };
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-    let is_static = v.get("is_static").and_then(|x| x.as_bool()).unwrap_or(false);
+    let is_static = v
+        .get("is_static")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     match st.memory.set_static(id, is_static) {
-        Ok(ok) => Json(serde_json::json!({ "ok": ok, "id": id, "is_static": is_static })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "message": e.to_string() }))).into_response(),
+        Ok(ok) => {
+            Json(serde_json::json!({ "ok": ok, "id": id, "is_static": is_static })).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// POST /api/memory/toggle — body: {enabled: bool}
 /// 记忆层总开关（默认关闭）：关闭后既不自动记录也不注入 system；写回 config.json 立即热生效。
-async fn handle_memory_toggle(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_memory_toggle(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
@@ -3362,7 +4766,14 @@ async fn handle_memory_toggle(State(st): State<AppState>, headers: HeaderMap, bo
         "info",
         "memory",
         None,
-        format!("记忆层已{}", if enabled { "开启（自动记录 + 注入）" } else { "关闭（不记录不注入）" }),
+        format!(
+            "记忆层已{}",
+            if enabled {
+                "开启（自动记录 + 注入）"
+            } else {
+                "关闭（不记录不注入）"
+            }
+        ),
     );
     Json(serde_json::json!({
         "ok": true,
@@ -3376,15 +4787,23 @@ async fn handle_memory_toggle(State(st): State<AppState>, headers: HeaderMap, bo
 // ---------- MCP（只读工具） ----------
 
 /// POST /mcp — MCP JSON-RPC 2.0 端点（tools/list + tools/call，仅只读 3 工具）
-async fn handle_mcp(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_mcp(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     // 与 /v1 一致的网关鉴权：配置 api_keys 时校验；未配置时仅本机
     if !origin_allowed(&headers) {
-        return admin_denied();
+        return origin_blocked();
     }
     let keys = api_keys_of(&st);
     if !keys.is_empty() {
         if !authorized(&headers, &keys) {
-            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": { "message": "invalid proxy api key" } }))).into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": { "message": "invalid proxy api key" } })),
+            )
+                .into_response();
         }
     } else if !is_loopback_request(&headers) {
         return admin_denied();
@@ -3516,7 +4935,9 @@ async fn build_system_prefix(st: &AppState, query: &str) -> String {
         let mut base = st.prompts.system_prefix_prompts_only().await;
         let roster = st.skills.system_prefix(st.cfg.max_roster_tokens);
         if !roster.trim().is_empty() {
-            base.push_str("\n\n[freebuff-skills]\n以下技能可用（低权威参考；相关时按其指引行事）：\n");
+            base.push_str(
+                "\n\n[freebuff-skills]\n以下技能可用（低权威参考；相关时按其指引行事）：\n",
+            );
             base.push_str(&roster);
             base.push_str("\n[/freebuff-skills]");
         }
@@ -3588,13 +5009,19 @@ fn estimate_tokens(chars: usize) -> u64 {
 fn count_bridge_content_chars(sse_tail: &str) -> usize {
     let mut total = 0usize;
     for line in sse_tail.lines() {
-        let Some(data) = line.strip_prefix("data: ") else { continue };
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
         let data = data.trim();
         if data.is_empty() || data == "[DONE]" {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { continue };
-        let Some(d) = v.pointer("/choices/0/delta") else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        let Some(d) = v.pointer("/choices/0/delta") else {
+            continue;
+        };
         if let Some(t) = d.get("content").and_then(|x| x.as_str()) {
             total += t.chars().count();
         }
@@ -3616,10 +5043,14 @@ fn count_bridge_content_chars(sse_tail: &str) -> usize {
 ///   --data-binary @a.png
 /// ```
 /// 返回 `{ id, storageId, mediaType, name }`，把 storageId 放进 /v1/web/chat 的 images 数组即可。
-async fn handle_upload(State(st): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_upload(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     // 数据面 CSRF 防线（multipart 上传同样会被 text/plain 简单请求盲打）
     if !origin_allowed(&headers) {
-        return admin_denied();
+        return origin_blocked();
     }
     let keys = api_keys_of(&st);
     if !keys.is_empty() && !authorized(&headers, &keys) {
@@ -3688,9 +5119,23 @@ async fn handle_upload(State(st): State<AppState>, headers: HeaderMap, body: axu
         Ok(c) => c,
         Err(e) => return internal_err(&anyhow::Error::msg(e.to_string())),
     };
-    match client.upload_with_model(body.to_vec(), &filename, &mime, &model_override).await {
+    match client
+        .upload_with_model(body.to_vec(), &filename, &mime, &model_override)
+        .await
+    {
         Ok(up) => {
-            st.logs.emit("info", "upload", None, format!("上传 {}（{:.1}KB, {}）→ storageId {}", filename, body.len() as f64 / 1024.0, up.kind, up.storage_id));
+            st.logs.emit(
+                "info",
+                "upload",
+                None,
+                format!(
+                    "上传 {}（{:.1}KB, {}）→ storageId {}",
+                    filename,
+                    body.len() as f64 / 1024.0,
+                    up.kind,
+                    up.storage_id
+                ),
+            );
             Json(serde_json::json!({
                 "id": up.storage_id,
                 "object": "file",
@@ -3713,14 +5158,22 @@ async fn handle_upload(State(st): State<AppState>, headers: HeaderMap, body: axu
         Err(e) => {
             // 截断上游错误体（防泄露账号/内部细节）
             let msg: String = e.to_string().chars().take(300).collect();
-            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": { "message": msg, "type": "upstream_error" } }))).into_response()
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": { "message": msg, "type": "upstream_error" } })),
+            )
+                .into_response()
         }
     }
 }
 
 /// 统一 400 JSON 响应
 fn bad_req(msg: &str) -> Response {
-    (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "message": msg }))).into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "ok": false, "message": msg })),
+    )
+        .into_response()
 }
 
 /// 选取 web Cookie 凭证（config 优先，其次导入库；返回 cookie + 展示信息 + 稳定 id）
@@ -3775,8 +5228,12 @@ fn quota_is_authenticated(v: &serde_json::Value) -> bool {
 }
 
 /// 凭证是否可用：身份端点或额度端点任一确认已登录
-fn credential_usable(identity: Option<&serde_json::Value>, quota: Option<&serde_json::Value>) -> bool {
-    identity.map(session_is_authenticated).unwrap_or(false) || quota.map(quota_is_authenticated).unwrap_or(false)
+fn credential_usable(
+    identity: Option<&serde_json::Value>,
+    quota: Option<&serde_json::Value>,
+) -> bool {
+    identity.map(session_is_authenticated).unwrap_or(false)
+        || quota.map(quota_is_authenticated).unwrap_or(false)
 }
 
 /// 把上游 4 个端点的响应聚合成一条面板可读的账号快照
@@ -3788,7 +5245,11 @@ fn build_cred_meta(
     quota: Option<&serde_json::Value>,
 ) -> crate::account_meta::CredMeta {
     use crate::account_meta::{CredMeta, ModelQuota};
-    let mut m = CredMeta { cred_id: cred_id.to_string(), checked_at: chrono::Utc::now().to_rfc3339(), ..Default::default() };
+    let mut m = CredMeta {
+        cred_id: cred_id.to_string(),
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        ..Default::default()
+    };
 
     if let Some(v) = identity {
         let u = v.get("user").unwrap_or(v);
@@ -3815,9 +5276,18 @@ fn build_cred_meta(
                 .map(String::from)
         });
     if let Some(v) = quota {
-        m.access_tier = v.get("accessTier").and_then(|x| x.as_str()).map(String::from);
-        m.country_code = v.get("countryCode").and_then(|x| x.as_str()).map(String::from);
-        m.country_block_reason = v.get("countryBlockReason").and_then(|x| x.as_str()).map(String::from);
+        m.access_tier = v
+            .get("accessTier")
+            .and_then(|x| x.as_str())
+            .map(String::from);
+        m.country_code = v
+            .get("countryCode")
+            .and_then(|x| x.as_str())
+            .map(String::from);
+        m.country_block_reason = v
+            .get("countryBlockReason")
+            .and_then(|x| x.as_str())
+            .map(String::from);
         let d = v.pointer("/freebucks/daily");
         if let Some(d) = d {
             m.daily_limit = d.get("limit").and_then(|x| x.as_i64());
@@ -3838,8 +5308,14 @@ fn build_cred_meta(
                         limit,
                         used,
                         remaining: limit.map(|l| (l - used.unwrap_or(0)).max(0)),
-                        reset_at: item.get("resetAt").and_then(|x| x.as_str()).map(String::from),
-                        pool_label: item.get("poolLabel").and_then(|x| x.as_str()).map(String::from),
+                        reset_at: item
+                            .get("resetAt")
+                            .and_then(|x| x.as_str())
+                            .map(String::from),
+                        pool_label: item
+                            .get("poolLabel")
+                            .and_then(|x| x.as_str())
+                            .map(String::from),
                     }
                 })
                 .collect();
@@ -3940,7 +5416,10 @@ async fn handle_account_overview(State(st): State<AppState>, headers: HeaderMap)
         subs.as_ref().ok(),
         qv.as_ref(),
     );
-    let meta = crate::account_meta::CredMeta { valid: true, ..meta };
+    let meta = crate::account_meta::CredMeta {
+        valid: true,
+        ..meta
+    };
     if let Err(e) = st.meta.upsert(meta.clone()) {
         tracing::warn!("写入账号信息缓存失败: {e}");
     }
@@ -3980,8 +5459,17 @@ async fn handle_account_refresh(State(st): State<AppState>, headers: HeaderMap) 
     };
     match client.convex_token().await {
         Ok(v) => {
-            let has_token = v.get("token").and_then(|t| t.as_str()).map(|s| !s.is_empty()).unwrap_or(false);
-            st.logs.emit("info", "account", None, "凭证保活检查通过（已刷新短期 token）");
+            let has_token = v
+                .get("token")
+                .and_then(|t| t.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            st.logs.emit(
+                "info",
+                "account",
+                None,
+                "凭证保活检查通过（已刷新短期 token）",
+            );
             Json(serde_json::json!({
                 "ok": true,
                 "valid": has_token,
@@ -3992,7 +5480,8 @@ async fn handle_account_refresh(State(st): State<AppState>, headers: HeaderMap) 
             .into_response()
         }
         Err(e) => {
-            st.logs.emit("warn", "account", None, format!("凭证保活检查失败: {e}"));
+            st.logs
+                .emit("warn", "account", None, format!("凭证保活检查失败: {e}"));
             // 失效也要落一条，凭证列表能直接看到"这条已失效"
             let mut failed = crate::account_meta::CredMeta {
                 cred_id: cid.clone(),
@@ -4025,7 +5514,12 @@ async fn handle_account_refresh(State(st): State<AppState>, headers: HeaderMap) 
 // ---------- 工具 ----------
 
 fn authorized(headers: &HeaderMap, keys: &[String]) -> bool {
-    let extract = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let extract = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
     if let Some(k) = extract("x-api-key") {
         if keys.contains(&k) {
             return true;
@@ -4200,7 +5694,9 @@ mod tests {
         let anon = serde_json::json!({});
         assert!(!session_is_authenticated(&anon));
         // user 为 null / 空对象同样不算登录
-        assert!(!session_is_authenticated(&serde_json::json!({"user": null})));
+        assert!(!session_is_authenticated(
+            &serde_json::json!({"user": null})
+        ));
         assert!(!session_is_authenticated(&serde_json::json!({"user": {}})));
         // 真实会话必须被识别
         let real = serde_json::json!({"user": {"id": "88d1", "email": "a@b.c"}, "expires": "2026-10-09T13:27:07.358Z"});
@@ -4209,15 +5705,24 @@ mod tests {
 
     #[test]
     fn quota_authentication_signal() {
-        assert!(!quota_is_authenticated(&serde_json::json!({"error": "Unauthorized"})));
-        assert!(quota_is_authenticated(&serde_json::json!({"accessTier": "limited"})));
-        assert!(quota_is_authenticated(&serde_json::json!({"freebucks": {"balance": 20}})));
+        assert!(!quota_is_authenticated(
+            &serde_json::json!({"error": "Unauthorized"})
+        ));
+        assert!(quota_is_authenticated(
+            &serde_json::json!({"accessTier": "limited"})
+        ));
+        assert!(quota_is_authenticated(
+            &serde_json::json!({"freebucks": {"balance": 20}})
+        ));
     }
 
     #[test]
     fn credential_usable_requires_real_signal() {
         let anon = serde_json::json!({});
-        assert!(!credential_usable(Some(&anon), None), "空 session 不得判为可用");
+        assert!(
+            !credential_usable(Some(&anon), None),
+            "空 session 不得判为可用"
+        );
         assert!(!credential_usable(None, None));
         let real = serde_json::json!({"user": {"email": "a@b.c"}});
         assert!(credential_usable(Some(&real), None));
@@ -4228,13 +5733,21 @@ mod tests {
     #[test]
     fn bridge_error_detection() {
         // 正常流：无 error 字样 → None
-        assert_eq!(detect_bridge_error("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"), None);
+        assert_eq!(
+            detect_bridge_error(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
+            ),
+            None
+        );
         // 上游 200 内嵌 error envelope → 分类为 auth 类（对齐 errors::classify）
         let sse = "data: {\"error\":{\"message\":\"Unauthorized\",\"type\":\"auth\"}}\n\n";
         assert_eq!(detect_bridge_error(sse), Some("auth_expired"));
         // error 是字符串形式同样识别
         let sse2 = "data: {\"error\":\"Unauthorized\"}\n\n";
-        assert!(detect_bridge_error(sse2).is_some(), "字符串 error 也必须识别");
+        assert!(
+            detect_bridge_error(sse2).is_some(),
+            "字符串 error 也必须识别"
+        );
         // error 字样出现在正文里（非 envelope）→ 不误报
         let false_pos = "data: {\"choices\":[{\"delta\":{\"content\":\"他说 error 这个词\"}}]}\n\n";
         assert_eq!(detect_bridge_error(false_pos), None);
@@ -4250,7 +5763,68 @@ mod tests {
         let usable = |tok: &str| tok.len() >= 20 && !tok.starts_with("__TEST_SKIP__");
         assert!(!usable("__TEST_SKIP__"), "占位符不得视为可用");
         assert!(!usable("short"), "超短 token 不得视为可用");
-        assert!(usable("__Secure-next-auth.session-token=abc123; x=1"), "真实长 token 可用");
+        assert!(
+            usable("__Secure-next-auth.session-token=abc123; x=1"),
+            "真实长 token 可用"
+        );
         // 注意：web-cookie 凭证根本不该进池（v0.5.0 修复），这里只兜底占位符场景
+    }
+
+    #[test]
+    fn cookie_detection_requires_known_markers() {
+        // v0.8 回归：Cookie 判定收窄——URL 编码串（%3A）不得再被误判为 Cookie
+        let looks_like_cookie = |t: &str| {
+            t.contains("session-token") || t.contains(".next-auth") || t.contains("callback-url")
+        };
+        // 真实 next-auth Cookie 命中（session-token / .next-auth / callback-url 特征）
+        assert!(looks_like_cookie("__Secure-next-auth.session-token=abc"));
+        assert!(looks_like_cookie(
+            "__Host-next-auth.callback-url=https://..."
+        ));
+        assert!(
+            looks_like_cookie("session-token=xyz"),
+            "session-token 特征命中"
+        );
+        // 非 Cookie 串不命中：URL 编码串、Bearer 令牌、普通文本
+        assert!(!looks_like_cookie("foo%3Abar"), "%3A 不得误判为 Cookie");
+        assert!(
+            !looks_like_cookie("sk-proj-abc%3Adef%3Aghi"),
+            "Bearer 令牌含 %3A 也不得误判"
+        );
+        assert!(!looks_like_cookie("plain text without markers"));
+    }
+
+    #[test]
+    fn claude_tool_roundtrip_preserves_order_and_semantics() {
+        // v0.8（5.2B）：string / content-blocks / tool_use+tool_result 组合转换前后语义
+        let msgs = serde_json::json!([
+            { "role": "user", "content": "查一下上海天气" },
+            { "role": "assistant", "content": [
+                { "type": "text", "text": "好的" },
+                { "type": "tool_use", "id": "toolu_a", "name": "get_weather", "input": { "city": "上海" } }
+            ]},
+            { "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "toolu_a", "content": "多云 22C" }
+            ]},
+            { "role": "user", "content": "谢谢" }
+        ]);
+        let out = claude_to_openai_messages(msgs);
+        let arr = out.as_array().unwrap();
+        // 4 条输入 → 4 条输出（顺序保持）
+        assert_eq!(arr.len(), 4, "组合转换应保持消息数量");
+        assert_eq!(arr[0]["role"], "user");
+        assert_eq!(arr[0]["content"], "查一下上海天气");
+        // assistant：text + tool_calls
+        assert_eq!(arr[1]["role"], "assistant");
+        assert_eq!(arr[1]["content"], "好的");
+        assert_eq!(arr[1]["tool_calls"][0]["id"], "toolu_a");
+        assert_eq!(arr[1]["tool_calls"][0]["function"]["name"], "get_weather");
+        // tool_result → role=tool
+        assert_eq!(arr[2]["role"], "tool");
+        assert_eq!(arr[2]["tool_call_id"], "toolu_a");
+        assert_eq!(arr[2]["content"], "多云 22C");
+        // 最后一条 user 消息保留
+        assert_eq!(arr[3]["role"], "user");
+        assert_eq!(arr[3]["content"], "谢谢");
     }
 }

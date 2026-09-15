@@ -80,7 +80,8 @@ impl UsageDb {
             .and_then(|mut s| s.exists([]))
             .unwrap_or(false);
         if !has_req_id {
-            conn.execute_batch("ALTER TABLE requests ADD COLUMN req_id TEXT DEFAULT '';").ok();
+            conn.execute_batch("ALTER TABLE requests ADD COLUMN req_id TEXT DEFAULT '';")
+                .ok();
         }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -99,7 +100,17 @@ impl UsageDb {
         api_key: &str,
         client_ip: &str,
     ) -> Result<()> {
-        self.record_ex(account, model, prompt_tokens, completion_tokens, latency_ms, status, api_key, client_ip, "")
+        self.record_ex(
+            account,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            latency_ms,
+            status,
+            api_key,
+            client_ip,
+            "",
+        )
     }
 
     /// 带 req_id 的记录（供请求详情与事件链关联）
@@ -117,7 +128,12 @@ impl UsageDb {
         req_id: &str,
     ) -> Result<()> {
         let ts = Utc::now().to_rfc3339();
-        let date = format!("{}-{:02}-{:02}", Utc::now().year(), Utc::now().month(), Utc::now().day());
+        let date = format!(
+            "{}-{:02}-{:02}",
+            Utc::now().year(),
+            Utc::now().month(),
+            Utc::now().day()
+        );
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO requests (ts,account,model,prompt_tokens,completion_tokens,latency_ms,status,api_key,client_ip,req_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
@@ -131,7 +147,13 @@ impl UsageDb {
                  prompt_tokens = prompt_tokens + excluded.prompt_tokens,
                  completion_tokens = completion_tokens + excluded.completion_tokens,
                  errors = errors + excluded.errors"#,
-            params![date, model, prompt_tokens, completion_tokens, if status >= 400 { 1 } else { 0 }],
+            params![
+                date,
+                model,
+                prompt_tokens,
+                completion_tokens,
+                if status >= 400 { 1 } else { 0 }
+            ],
         )?;
         Ok(())
     }
@@ -193,7 +215,9 @@ impl UsageDb {
 
     pub fn daily_usage(&self, days: i64) -> Result<Vec<DailyUsage>> {
         let conn = self.conn.lock().unwrap();
-        let cutoff = (Utc::now() - chrono::Duration::days(days)).date_naive().to_string();
+        let cutoff = (Utc::now() - chrono::Duration::days(days))
+            .date_naive()
+            .to_string();
         let mut stmt = conn.prepare(
             "SELECT date,model,requests,prompt_tokens,completion_tokens,errors FROM daily_usage WHERE date >= ?1 ORDER BY date DESC, model",
         )?;
@@ -217,9 +241,21 @@ impl UsageDb {
     pub fn totals(&self) -> Result<serde_json::Value> {
         let conn = self.conn.lock().unwrap();
         let reqs: i64 = conn.query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))?;
-        let prompt: i64 = conn.query_row("SELECT COALESCE(SUM(prompt_tokens),0) FROM requests", [], |r| r.get(0))?;
-        let comp: i64 = conn.query_row("SELECT COALESCE(SUM(completion_tokens),0) FROM requests", [], |r| r.get(0))?;
-        let errors: i64 = conn.query_row("SELECT COUNT(*) FROM requests WHERE status >= 400", [], |r| r.get(0))?;
+        let prompt: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(prompt_tokens),0) FROM requests",
+            [],
+            |r| r.get(0),
+        )?;
+        let comp: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(completion_tokens),0) FROM requests",
+            [],
+            |r| r.get(0),
+        )?;
+        let errors: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM requests WHERE status >= 400",
+            [],
+            |r| r.get(0),
+        )?;
         Ok(serde_json::json!({
             "total_requests": reqs,
             "prompt_tokens": prompt,

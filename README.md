@@ -8,7 +8,7 @@ Freebuff2API 将 [Freebuff](https://freebuff.com) 免费层逆向为 **OpenAI �
 
 - **双协议出口** — `POST /v1/chat/completions`（OpenAI，流式/非流式）+ `POST /v1/messages`（Claude），适配任意 OpenAI SDK。
 - **多账号智能轮询** — 多 Bearer token / web Cookie，健康评分 + 冷却熔断 + 最优账号选择。
-- **双桶并发信号量** — 逆向自桌面端：免费 `{付费槽:1, 普通:3}`、订阅 `{付费槽:3, 普通:8}`。
+- **双桶并发信号量** — 逆向自桌面端并已落地（v0.8）：免费 `{槽:1, 并发:3}`、订阅 `{槽:3, 并发:8}`，网关全局级。每个请求同时占用"槽"与"并发"各一，**实际并发上限 = 槽位容量**（免费层 1、订阅层 3），超时 2s 返回 429。
 - **会话保活** — 45s 心跳 + 广告刷新延长额度；排队返回 Retry-After；401 自动冷却。
 - **思考程度降级** — 逆向自上游 efforts 字段：glm/deepseek 支持 `low/high/max`，solar/minimax/mimo 不支持自动剥离；Codex 选超范围 effort 自动降级。
 - **余额/积分查询** — `GET /api/account/balance`：freebucks 积分、每模型每日剩余、套餐、地区限制。
@@ -21,7 +21,7 @@ Freebuff2API 将 [Freebuff](https://freebuff.com) 免费层逆向为 **OpenAI �
 ## 快速开始
 
 ### 桌面版（推荐）
-1. 下载 `Freebuff2API Setup 0.3.0.exe`（Release 页）
+1. 下载最新版 `Freebuff2API Setup x64.exe`（Release 页，当前 v0.8.x）
 2. 安装后双击 → 自动拉起网关 + 打开控制台
 3. 托盘「一键登录新账号」→ 浏览器登录 freebuff.com → 自动抓 Cookie 入库
 
@@ -85,7 +85,7 @@ docker run -d -p 47821:47821 -v /data:/data freebuff2api
 
 ## 多账号轮询与并发
 - 每请求自动选健康度最高的账号
-- 上游双桶并发限制（逆向自桌面端 orchestrator.js）：免费 `{slot:1, multi:3}`、订阅 `{slot:3, multi:8}`
+- 上游双桶并发限制（v0.8 已落地实现）：免费 `{槽:1, 并发:3}`、订阅 `{槽:3, 并发:8}`（实际并发上限=槽位，见上）
 - 等待室：429 + retry-after 自动退避
 
 ## 思考程度支持矩阵（逆向自上游）
@@ -100,8 +100,8 @@ docker run -d -p 47821:47821 -v /data:/data freebuff2api
 ## 测试与验证
 
 ```bash
-cargo test        # 32 项测试全绿（24 单元 + 8 集成）
-cargo clippy      # 零警告
+cargo test        # 236 单测 + 8 集成 + 10 路由级集成全绿
+cargo clippy -D warnings  # 零警告
 ```
 
 真实 E2E 已实测：token 导入（curl/HAR/Cookie）✅、余额查询 ✅、账号详情 ✅、面板 ✅、上游冒烟 ✅。

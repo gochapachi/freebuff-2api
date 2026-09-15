@@ -72,7 +72,9 @@ struct RegistryInner {
 impl ModelRegistry {
     pub fn new() -> Self {
         let inner = RegistryInner::default();
-        Self { inner: Arc::new(RwLock::new(inner)) }
+        Self {
+            inner: Arc::new(RwLock::new(inner)),
+        }
     }
 
     /// 以硬编码为底座初始化
@@ -105,7 +107,10 @@ impl ModelRegistry {
     }
 
     /// 拉取上游 free-agents.ts 增量补充
-    pub async fn refresh_from_upstream(&self, client: &reqwest::Client) -> Result<(usize, usize), anyhow::Error> {
+    pub async fn refresh_from_upstream(
+        &self,
+        client: &reqwest::Client,
+    ) -> Result<(usize, usize), anyhow::Error> {
         const SRC: &str = "https://raw.githubusercontent.com/CodebuffAI/codebuff/main/common/src/constants/free-agents.ts";
         let resp = client.get(SRC).send().await?;
         if !resp.status().is_success() {
@@ -205,7 +210,9 @@ fn hardcoded_fallback_map() -> HashMap<String, Vec<String>> {
         HARDCODED_MODELS.iter().map(|s| s.to_string()).collect(),
     );
     for (agent, model) in SUB_AGENTS {
-        map.entry(agent.to_string()).or_default().push(model.to_string());
+        map.entry(agent.to_string())
+            .or_default()
+            .push(model.to_string());
     }
     map
 }
@@ -213,8 +220,7 @@ fn hardcoded_fallback_map() -> HashMap<String, Vec<String>> {
 /// 解析上游 free-agents.ts 的 agent→models 映射
 pub fn parse_free_agents(source: &str) -> HashMap<String, Vec<String>> {
     // 支持三种形态：new Set([...]) / 数组 [...] / 常量引用（无法解析，跳过）
-    let block = Regex::new(r"'([^']+)':\s*(?:new\s+Set\(\s*)?\[([^\]]*)\]")
-        .unwrap();
+    let block = Regex::new(r"'([^']+)':\s*(?:new\s+Set\(\s*)?\[([^\]]*)\]").unwrap();
     let model = Regex::new(r"'([^']+)'").unwrap();
     let mut result = HashMap::new();
     for cap in block.captures_iter(source) {

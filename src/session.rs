@@ -115,7 +115,9 @@ impl SessionManager {
             // 已是活跃且未过期
             if inner.status == SessionStatus::Active {
                 if let Some(id) = &inner.instance_id {
-                    let expires = inner.expires_at.unwrap_or(Utc::now() + Duration::from_secs(3600));
+                    let expires = inner
+                        .expires_at
+                        .unwrap_or(Utc::now() + Duration::from_secs(3600));
                     if Utc::now() + Duration::from_secs(5) < expires {
                         return Ok(id.clone());
                     }
@@ -183,7 +185,10 @@ impl SessionManager {
         match status {
             SessionStatus::Active => {
                 inner.instance_id = sess.instance_id();
-                inner.expires_at = sess.expires_at.as_deref().and_then(crate::upstream::parse_optional_time);
+                inner.expires_at = sess
+                    .expires_at
+                    .as_deref()
+                    .and_then(crate::upstream::parse_optional_time);
                 inner.position = None;
                 inner.queue_depth = None;
             }
@@ -191,7 +196,10 @@ impl SessionManager {
                 inner.instance_id = sess.instance_id();
                 inner.position = sess.position;
                 inner.queue_depth = sess.queue_depth.or(sess.position);
-                let wait_ms = sess.estimated_wait_ms.unwrap_or(5_000).clamp(1_000, SESSION_POLL_INTERVAL_SEC as i64 * 1000);
+                let wait_ms = sess
+                    .estimated_wait_ms
+                    .unwrap_or(5_000)
+                    .clamp(1_000, SESSION_POLL_INTERVAL_SEC as i64 * 1000);
                 inner.poll_after = Some(Utc::now() + Duration::from_millis(wait_ms as u64));
             }
             SessionStatus::Disabled => {
@@ -237,7 +245,10 @@ impl SessionManager {
             position: inner.position,
             queue_depth: inner.queue_depth,
             last_error: inner.last_error.clone(),
-            updated_at: inner.last_poll_at.map(|d| d.to_rfc3339()).unwrap_or_default(),
+            updated_at: inner
+                .last_poll_at
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_default(),
             heartbeat_count: self.heartbeat_count.load(Ordering::Relaxed) as u64,
             ad_renewals: self.ad_renewals.load(Ordering::Relaxed) as u64,
         }

@@ -14,36 +14,55 @@ pub const INDEX_HTML: &str = r##"<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Freebuff2API 控制台</title>
 <style>
-:root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#e6edf3; --muted:#8b949e; --accent:#2f81f7; --ok:#3fb950; --warn:#d29922; --err:#f85149; }
+:root {
+  /* 色板（品牌化暗色：主色 #4f8cff 系 + 状态语义色） */
+  --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#e6edf3; --muted:#8b949e;
+  --accent:#4f8cff; --accent-soft:#132a4a; --ok:#3fb950; --warn:#d29922; --err:#f85149;
+  /* 间距 token */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:24px;
+  /* 圆角 token */
+  --r-sm:6px; --r-md:10px; --r-lg:14px;
+  /* 阴影 token */
+  --sh-card:0 1px 2px rgba(0,0,0,.4); --sh-float:0 8px 24px rgba(0,0,0,.5);
+  /* 动效 token */
+  --dur-fast:120ms; --dur-norm:200ms; --ease-out:cubic-bezier(.16,1,.3,1);
+}
 * { box-sizing:border-box; margin:0; padding:0; }
 body { background:var(--bg); color:var(--text); font-family:-apple-system,'Segoe UI',Roboto,'Microsoft YaHei',sans-serif; min-height:100vh; }
-header { display:flex; align-items:center; justify-content:space-between; padding:12px 24px; border-bottom:1px solid var(--border); background:var(--card); position:sticky; top:0; z-index:10; }
+/* 尊重减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  * { animation:none !important; transition:none !important; }
+}
+header { display:flex; align-items:center; justify-content:space-between; padding:var(--sp-3) var(--sp-6); border-bottom:1px solid var(--border); background:var(--card); position:sticky; top:0; z-index:10; }
 header h1 { font-size:17px; font-weight:600; }
-header .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--muted); margin-right:8px; vertical-align:middle; }
+header .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--muted); margin-right:var(--sp-2); vertical-align:middle; }
 header .dot.ok { background:var(--ok); } header .dot.err { background:var(--err); }
 /* 记忆层总开关（toggle switch） */
 .switch { position:relative; display:inline-block; width:42px; height:24px; flex:none; }
 .switch input { opacity:0; width:0; height:0; }
-.switch .slider { position:absolute; cursor:pointer; inset:0; background:#2d333b; border-radius:24px; transition:.2s; }
-.switch .slider::before { content:''; position:absolute; height:18px; width:18px; left:3px; bottom:3px; background:#e6edf3; border-radius:50%; transition:.2s; }
+.switch .slider { position:absolute; cursor:pointer; inset:0; background:#2d333b; border-radius:24px; transition:var(--dur-fast) var(--ease-out); }
+.switch .slider::before { content:''; position:absolute; height:18px; width:18px; left:3px; bottom:3px; background:#e6edf3; border-radius:50%; transition:var(--dur-fast) var(--ease-out); }
 .switch input:checked + .slider { background:var(--accent); }
 .switch input:checked + .slider::before { transform:translateX(18px); }
-.hstat { display:flex; gap:16px; font-size:12px; color:var(--muted); }
+.hstat { display:flex; gap:var(--sp-4); font-size:12px; color:var(--muted); }
 .hstat b { color:var(--text); }
-main { max-width:1240px; margin:0 auto; padding:20px 24px 60px; }
-nav { display:flex; gap:4px; margin-bottom:20px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+main { max-width:1240px; margin:0 auto; padding:var(--sp-5) var(--sp-6) 60px; }
+nav { display:flex; gap:var(--sp-1); margin-bottom:var(--sp-5); border-bottom:1px solid var(--border); flex-wrap:wrap; }
 nav button { background:transparent; border:none; color:var(--muted); padding:10px 16px; cursor:pointer; font-size:14px; border-bottom:2px solid transparent; border-radius:0; }
 nav button.active { color:var(--text); border-bottom-color:var(--accent); }
 nav button:hover { color:var(--text); }
-.cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:14px; margin-bottom:20px; }
-.card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
-.card .num { font-size:26px; font-weight:700; margin-top:4px; }
+/* 焦点可见环（可访问性） */
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:14px; margin-bottom:var(--sp-5); }
+.card { background:var(--card); border:1px solid var(--border); border-radius:var(--r-md); padding:14px 16px; box-shadow:var(--sh-card); transition:transform var(--dur-fast) var(--ease-out), border-color var(--dur-fast); }
+.card:hover { transform:translateY(-1px); border-color:#3a4250; }
+.card .num { font-size:26px; font-weight:700; margin-top:var(--sp-1); }
 .card .lbl { color:var(--muted); font-size:13px; }
-.grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+.grid { display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-5); }
 @media(max-width:920px){ .grid{grid-template-columns:1fr} }
-.panel { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:20px; }
-.panel h2 { font-size:15px; margin-bottom:12px; color:var(--muted); font-weight:600; }
-.panel h1 { font-size:18px; margin-bottom:12px; }
+.panel { background:var(--card); border:1px solid var(--border); border-radius:var(--r-md); padding:var(--sp-4); margin-bottom:var(--sp-5); box-shadow:var(--sh-card); }
+.panel h2 { font-size:15px; margin-bottom:var(--sp-3); color:var(--muted); font-weight:600; }
+.panel h1 { font-size:18px; margin-bottom:var(--sp-3); }
 table { width:100%; border-collapse:collapse; font-size:13px; }
 th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--border); }
 th { color:var(--muted); font-weight:500; }
@@ -53,37 +72,43 @@ tr.click { cursor:pointer; } tr.click:hover { background:#1c2129; }
 .badge.warn { background:#5a4a1a; color:var(--warn); }
 .badge.err { background:#5e1a1a; color:var(--err); }
 .badge.dim { background:#21262d; color:var(--muted); }
-.chip { display:inline-block; background:#21262d; border:1px solid var(--border); border-radius:6px; padding:2px 8px; margin:2px; font-size:12px; }
-button { background:var(--accent); color:#fff; border:none; border-radius:6px; padding:6px 14px; cursor:pointer; font-size:13px; }
+.chip { display:inline-block; background:#21262d; border:1px solid var(--border); border-radius:var(--r-sm); padding:2px 8px; margin:2px; font-size:12px; }
+button { background:var(--accent); color:#fff; border:none; border-radius:var(--r-sm); padding:6px 14px; cursor:pointer; font-size:13px; transition:filter var(--dur-fast); }
 button:hover { filter:brightness(1.12); }
+button:disabled { opacity:.5; cursor:not-allowed; }
 button.ghost { background:transparent; border:1px solid var(--border); color:var(--text); }
+button.ghost:hover { border-color:var(--accent); color:var(--accent); }
 button.sm { padding:3px 10px; font-size:12px; }
-input,textarea,select { background:#0d1117; border:1px solid var(--border); color:var(--text); border-radius:6px; padding:8px 10px; font-size:13px; width:100%; font-family:inherit; }
+input,textarea,select { background:#0d1117; border:1px solid var(--border); color:var(--text); border-radius:var(--r-sm); padding:8px 10px; font-size:13px; width:100%; font-family:inherit; transition:border-color var(--dur-fast); }
+input:focus,textarea:focus,select:focus { border-color:var(--accent); }
 textarea { min-height:90px; resize:vertical; }
-label { display:block; color:var(--muted); font-size:12px; margin:8px 0 4px; }
-.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+label { display:block; color:var(--muted); font-size:12px; margin:var(--sp-2) 0 var(--sp-1); }
+.row { display:flex; gap:var(--sp-2); align-items:center; flex-wrap:wrap; }
 .empty { color:var(--muted); font-size:13px; padding:14px 4px; }
 .empty b { color:var(--text); }
-#toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--card); border:1px solid var(--accent); padding:10px 20px; border-radius:8px; display:none; z-index:100; font-size:13px; }
-.logs { max-height:460px; overflow:auto; font-family:ui-monospace,Consolas,monospace; font-size:12px; background:#0a0d12; border:1px solid var(--border); border-radius:8px; padding:8px; }
+#toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--card); border:1px solid var(--accent); padding:10px 20px; border-radius:var(--r-md); display:none; z-index:100; font-size:13px; box-shadow:var(--sh-float); animation:toastIn var(--dur-norm) var(--ease-out); }
+@keyframes toastIn { from { opacity:0; transform:translate(-50%,8px); } to { opacity:1; transform:translate(-50%,0); } }
+.logs { max-height:460px; overflow:auto; font-family:ui-monospace,Consolas,monospace; font-size:12px; background:#0a0d12; border:1px solid var(--border); border-radius:var(--r-md); padding:var(--sp-2); }
 .logs div { padding:2px 4px; border-bottom:1px dashed #1c2129; white-space:pre-wrap; word-break:break-all; }
 .logs .lv-warn { color:var(--warn); } .logs .lv-error { color:var(--err); } .logs .lv-info { color:var(--muted); }
-#drawer { position:fixed; top:0; right:-560px; width:560px; max-width:92vw; height:100vh; background:var(--card); border-left:1px solid var(--border); transition:right .18s ease; overflow:auto; padding:20px; z-index:50; }
+#drawer { position:fixed; top:0; right:-560px; width:560px; max-width:92vw; height:100vh; background:var(--card); border-left:1px solid var(--border); transition:right var(--dur-norm) var(--ease-out); overflow:auto; padding:var(--sp-5); z-index:50; box-shadow:var(--sh-float); }
 #drawer.open { right:0; }
 #drawer h3 { margin-bottom:10px; }
 .kv { font-size:13px; margin:4px 0; } .kv b { color:var(--muted); font-weight:500; display:inline-block; min-width:110px; }
-pre { background:#0a0d12; border:1px solid var(--border); border-radius:8px; padding:10px; overflow:auto; font-size:12px; }
+pre { background:#0a0d12; border:1px solid var(--border); border-radius:var(--r-md); padding:10px; overflow:auto; font-size:12px; }
 details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-size:13px; }
-.banner { background:linear-gradient(135deg,#132a4a,#161b22); border:1px solid var(--accent); border-radius:10px; padding:16px; margin-bottom:20px; }
-.banner h2 { color:var(--text); margin-bottom:8px; }
-.banner ol { margin-left:20px; font-size:13px; color:var(--muted); line-height:2; }
-.banner code { background:#0a0d12; padding:2px 6px; border-radius:4px; }
+.banner { background:linear-gradient(135deg,var(--accent-soft),#161b22); border:1px solid var(--accent); border-radius:var(--r-lg); padding:var(--sp-4); margin-bottom:var(--sp-5); }
+.banner h2 { color:var(--text); margin-bottom:var(--sp-2); }
+.banner ol { margin-left:var(--sp-5); font-size:13px; color:var(--muted); line-height:2; }
+.banner code { background:#0a0d12; padding:2px 6px; border-radius:var(--r-sm); }
 .doctor-item { display:flex; gap:10px; padding:10px 0; border-bottom:1px solid var(--border); font-size:13px; align-items:flex-start; }
 .doctor-item .st { min-width:56px; }
 .tok { color:var(--ok); } .twarn { color:var(--warn); } .terr { color:var(--err); }
 #login-wizard { scroll-margin-top:70px; }
-@keyframes wizardFlash { 0%,100% { box-shadow:0 0 0 0 rgba(47,129,247,0); } 50% { box-shadow:0 0 0 4px rgba(47,129,247,.5); } }
+@keyframes wizardFlash { 0%,100% { box-shadow:0 0 0 0 rgba(79,140,255,0); } 50% { box-shadow:0 0 0 4px rgba(79,140,255,.5); } }
 .wizard-flash { animation:wizardFlash .8s ease-in-out 2; }
+/* 窄屏导航横向滚动（v0.8 可访问性） */
+@media(max-width:640px){ nav{ flex-wrap:nowrap; overflow-x:auto; } nav button{ flex:none; } }
 </style>
 </head>
 <body>
@@ -98,6 +123,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
   <div id="cost-line" style="font-size:13px;color:var(--muted);margin:-8px 0 16px 2px"></div>
   <nav>
     <button data-tab="overview" class="active" onclick="showTab('overview')">总览</button>
+    <button data-tab="play" onclick="showTab('play')">测试台</button>
     <button data-tab="account" onclick="showTab('account')">账号</button>
     <button data-tab="skills" onclick="showTab('skills')">技能</button>
     <button data-tab="memory" onclick="showTab('memory')">记忆</button>
@@ -105,6 +131,8 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
     <button data-tab="teach" onclick="showTab('teach')">原理</button>
     <button data-tab="doctor" onclick="showTab('doctor')">系统体检</button>
     <button data-tab="guide" onclick="showTab('guide')">接入指南</button>
+    <button data-tab="settings" onclick="showTab('settings')">设置</button>
+    <button data-tab="about" onclick="showTab('about')">关于</button>
   </nav>
 
   <section id="tab-overview">
@@ -395,6 +423,43 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
       <pre id="g-lobe"></pre><button class="ghost sm" onclick="copyText(document.getElementById('g-lobe').textContent)">复制</button>
     </div>
   </section>
+
+  <!-- 对话测试台（v0.8 新增） -->
+  <section id="tab-play" style="display:none">
+    <div class="panel">
+      <h2>💬 对话测试台</h2>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:10px">不发请求到上游就验证网关链路：选模型 → 输入消息 → 流式渲染回复（调 <code>/v1/chat/completions</code>）。</p>
+      <div class="row" style="margin-bottom:10px">
+        <select id="play-model" style="max-width:320px;flex:1"></select>
+        <button class="ghost sm" onclick="loadModelsIntoPlay()">刷新模型</button>
+      </div>
+      <textarea id="play-input" placeholder="输入一条消息，例如：用一句话介绍你自己" style="min-height:64px"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button onclick="playSend()">🚀 发送</button>
+        <button class="ghost sm" onclick="playStop()">停止</button>
+        <button class="ghost sm" onclick="playClear()">清空</button>
+        <span id="play-status" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div id="play-output" class="logs" style="margin-top:10px;max-height:360px;font-size:13px"><div class="empty">回复会实时显示在这里</div></div>
+    </div>
+  </section>
+
+  <!-- 设置页（v0.8 新增） -->
+  <section id="tab-settings" style="display:none">
+    <div class="panel">
+      <h2>⚙️ 设置</h2>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:12px">修改后写回 <code>config.json</code>（原子写，不覆盖其他配置）。<b>监听地址与部分项需重启生效</b>。</p>
+      <div id="settings-wrap"><div class="empty">加载中…</div></div>
+    </div>
+  </section>
+
+  <!-- 关于页（v0.8 新增） -->
+  <section id="tab-about" style="display:none">
+    <div class="panel">
+      <h2>ℹ️ 关于 Freebuff2API</h2>
+      <div id="about-wrap"><div class="empty">加载中…</div></div>
+    </div>
+  </section>
 </main>
 
 <div id="drawer"><div class="row"><h3 id="dr-title">请求详情</h3><span style="flex:1"></span><button class="ghost sm" onclick="closeDrawer()">关闭</button></div><div id="dr-body"></div></div>
@@ -432,7 +497,7 @@ function fmtTime(ts) { try { return new Date(ts).toLocaleTimeString('zh-CN', { h
 // ---------- Tab ----------
 function showTab(name) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
-  for (const t of ['overview','account','skills','memory','logs','teach','doctor','guide']) {
+  for (const t of ['overview','play','account','skills','memory','logs','teach','doctor','guide','settings','about']) {
     const el = $('tab-' + t); if (el) el.style.display = (t === name) ? '' : 'none';
   }
   if (name === 'skills') refreshSkills();
@@ -442,6 +507,156 @@ function showTab(name) {
   if (name === 'overview') { loadBalance(); loadGuide(); }
   if (name === 'logs') initLogs();
   if (name === 'guide') loadGuide();
+  if (name === 'play') loadModelsIntoPlay();
+  if (name === 'settings') loadSettings();
+  if (name === 'about') loadAbout();
+}
+
+// ---------- 对话测试台（v0.8） ----------
+let playAbort = null;
+async function loadModelsIntoPlay() {
+  const sel = $('play-model'); if (!sel) return;
+  try {
+    const m = await api('/v1/models');
+    const list = (m && m.data || []).map(x => x.id);
+    const cur = sel.value;
+    sel.innerHTML = list.length ? list.map(id => `<option value="${esc(id)}" ${id===cur?'selected':''}>${esc(id)}</option>`).join('')
+      : '<option value="">（无模型）</option>';
+    if (!list.includes(cur)) sel.value = list[0] || '';
+  } catch (e) { sel.innerHTML = `<option value="z-ai/glm-5.3-flash">z-ai/glm-5.3-flash（读取失败，用默认）</option>`; }
+}
+async function playSend() {
+  const out = $('play-output'); if (!out) return;
+  const model = $('play-model').value || 'z-ai/glm-5.3-flash';
+  const text = $('play-input').value.trim();
+  if (!text) { toast('请输入消息', 3000); return; }
+  if (playAbort) playAbort.abort();
+  playAbort = new AbortController();
+  $('play-status').textContent = '请求中…';
+  out.innerHTML = '<div class="empty">等待回复…</div>';
+  const started = Date.now();
+  try {
+    const resp = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: Object.assign({ 'content-type': 'application/json' }, apiKey() ? { 'authorization': 'Bearer ' + apiKey() } : {}),
+      body: JSON.stringify({ model, messages: [{ role: 'user', content: text }], stream: true }),
+      signal: playAbort.signal,
+    });
+    if (!resp.ok || !resp.body) {
+      const err = await resp.text().catch(() => '');
+      let msg = `HTTP ${resp.status}`;
+      try { msg = JSON.parse(err).error?.message || msg; } catch (e) {}
+      out.innerHTML = `<div class="lv-error">❌ 请求失败：${esc(msg)}</div>`;
+      $('play-status').textContent = `失败（${Date.now()-started}ms）`;
+      return;
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    let content = '';
+    out.innerHTML = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      // 按行解析 SSE（缓冲不完整块）
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') { buf = ''; break; }
+        try {
+          const j = JSON.parse(data);
+          const delta = j.choices?.[0]?.delta?.content || '';
+          if (delta) {
+            content += delta;
+            out.innerHTML = `<div style="white-space:pre-wrap">${esc(content)}</div>`;
+            out.scrollTop = out.scrollHeight;
+          }
+        } catch (e) { /* 忽略解析中间块 */ }
+      }
+    }
+    $('play-status').textContent = content ? `完成（${Date.now()-started}ms，${content.length} 字符）` : '完成（无内容）';
+  } catch (e) {
+    if (e.name === 'AbortError') { out.innerHTML = '<div class="empty">已停止</div>'; $('play-status').textContent = '已停止'; }
+    else { out.innerHTML = `<div class="lv-error">❌ 网络错误：${esc(e.message)}</div>`; $('play-status').textContent = '网络错误'; }
+  } finally { playAbort = null; }
+}
+function playStop() { if (playAbort) playAbort.abort(); }
+function playClear() { $('play-output').innerHTML = '<div class="empty">回复会实时显示在这里</div>'; $('play-status').textContent = ''; $('play-input').value = ''; }
+
+// ---------- 设置页（v0.8） ----------
+// 设置项渲染规格（key → label/type/hint）
+const SETTINGS_SPEC = [
+  { key: 'listen_addr', label: '监听地址', type: 'text', hint: '改后需重启网关生效（如 127.0.0.1:47821）' },
+  { key: 'memory_enabled', label: '记忆层（默认关）', type: 'switch', hint: '开启后自动记录常用模型/纠正并注入 system 前缀' },
+  { key: 'token_saver', label: 'Token 节省（压缩超长 tool_result）', type: 'switch', hint: '' },
+  { key: 'redact_logs', label: '日志/遥测脱敏', type: 'switch', hint: '把 Cookie/Bearer/authorization 值替换为 ***' },
+  { key: 'skills_inject_mode', label: '技能注入模式', type: 'select', options: ['roster', 'full'], hint: 'roster=只注入名称+描述；full=全量拼接' },
+  { key: 'max_roster_tokens', label: 'Roster 注入 token 预算', type: 'number', hint: '' },
+  { key: 'http_proxy', label: 'HTTP 代理', type: 'text', hint: 'http(s):// 或 socks5:// 开头，留空 = 直连' },
+  { key: 'thread_cleanup_interval_sec', label: '上游会话清理间隔（秒）', type: 'number', hint: '0 = 关闭自动清理' },
+  { key: 'thread_max_age_hours', label: '会话最大保留时长（小时）', type: 'number', hint: '' },
+  { key: 'concurrency_free_slots', label: '免费层并发槽位', type: 'number', hint: '双桶信号量：免费 {槽,普通}' },
+  { key: 'concurrency_free_multi', label: '免费层并发（普通）', type: 'number', hint: '' },
+  { key: 'concurrency_sub_slots', label: '订阅层并发槽位', type: 'number', hint: '订阅 {槽,普通}' },
+  { key: 'concurrency_sub_multi', label: '订阅层并发（普通）', type: 'number', hint: '' },
+];
+async function loadSettings() {
+  const w = $('settings-wrap'); if (!w) return;
+  try {
+    const g = await api('/api/config');
+    const e = g.editable || {};
+    w.innerHTML = '<div class="grid" style="gap:14px">' + SETTINGS_SPEC.map(s => {
+      const val = e[s.key];
+      let ctrl = '';
+      if (s.type === 'switch') {
+        ctrl = `<label class="switch"><input type="checkbox" ${val ? 'checked' : ''} onchange="saveSetting('${s.key}', this.checked)"><span class="slider"></span></label>`;
+      } else if (s.type === 'select') {
+        ctrl = `<select onchange="saveSetting('${s.key}', this.value)">${s.options.map(o => `<option value="${o}" ${val===o?'selected':''}>${o}</option>`).join('')}</select>`;
+      } else if (s.type === 'number') {
+        ctrl = `<input type="number" value="${val ?? ''}" onchange="saveSetting('${s.key}', this.value)">`;
+      } else {
+        ctrl = `<input type="text" value="${esc(String(val ?? ''))}" onchange="saveSetting('${s.key}', this.value)">`;
+      }
+      return `<div class="panel" style="margin:0"><div class="row"><div style="flex:1"><div style="font-size:13px">${esc(s.label)}</div>${s.hint ? `<div style="font-size:12px;color:var(--muted);margin-top:2px">${esc(s.hint)}</div>` : ''}</div>${ctrl}</div></div>`;
+    }).join('') + '</div>';
+  } catch (e) { w.innerHTML = `<div class="empty">设置加载失败：${esc(e.message)}</div>`; }
+}
+async function saveSetting(key, value) {
+  try {
+    const r = await api('/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key, value }) });
+    toast((r.message || '已保存') + (r.persisted === false ? '（未找到 config.json，仅本次运行生效）' : ''), 4000);
+    if (key === 'memory_enabled') loadSettings(); // 刷新开关态
+  } catch (e) { toast('保存失败：' + e.message, 5000); }
+}
+
+// ---------- 关于页（v0.8） ----------
+async function loadAbout() {
+  const w = $('about-wrap'); if (!w) return;
+  try {
+    const h = await api('/healthz');
+    const ver = h.version || '未知';
+    w.innerHTML = `
+      <div class="kv"><b>版本</b><span id="about-ver">v${esc(ver)}</span></div>
+      <div class="kv"><b>运行时长</b><span>${fmtUp(h.uptime_sec || 0)}</span></div>
+      <div class="kv"><b>监听地址</b><span>${esc(location.host)}</span></div>
+      <div class="kv"><b>上游</b><span>freebuff.com（逆向免费层）</span></div>
+      <div class="kv"><b>模型数</b><span>${h.model_count ?? '—'}</span></div>
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);font-size:13px;color:var(--muted);line-height:1.8">
+        Freebuff2API 将 Freebuff 免费层逆向为 OpenAI/Anthropic 兼容的本地 API 网关。
+        本项目与 OpenAI、Codebuff、Freebuff 无官方关联，仅供交流、实验与学习使用，按"原样"提供，使用者自行承担风险（MIT 协议）。
+      </div>
+      <div style="margin-top:10px;font-size:12px;color:var(--muted)">安全提示：日志/遥测脱敏默认开启；凭证仅存本机。请勿将监听地址暴露到公网（除非配置 api_keys）。</div>`;
+  } catch (e) { w.innerHTML = `<div class="empty">关于信息加载失败：${esc(e.message)}</div>`; }
+}
+function fmtUp(secs) {
+  if (secs < 60) return secs + ' 秒';
+  if (secs < 3600) return Math.floor(secs/60) + ' 分钟';
+  if (secs < 86400) return Math.floor(secs/3600) + ' 小时 ' + Math.floor((secs%3600)/60) + ' 分';
+  return Math.floor(secs/86400) + ' 天';
 }
 
 // ---------- 接入信息（地址 / Key / 客户端配置） ----------
@@ -1284,23 +1499,52 @@ async function initLogs() {
   try {
     const d = await api('/api/logs/recent?limit=100');
     logEvents = d.events || [];
+    bindLogScroll();
     renderLogs();
     logSource = new EventSource('/api/logs/stream' + (apiKey() ? '?key=' + encodeURIComponent(apiKey()) : ''));
     logSource.onmessage = (e) => {
-      try { const ev = JSON.parse(e.data); logEvents.push(ev); if (logEvents.length > 500) logEvents = logEvents.slice(-500); renderLogs(); } catch (err) {}
+      try { const ev = JSON.parse(e.data); logEvents.push(ev); if (logEvents.length > 1000) logEvents = logEvents.slice(-1000); renderLogs(); } catch (err) {}
     };
     logSource.onerror = () => { /* 自动重连由浏览器处理 */ };
   } catch (e) { $('logbox').innerHTML = `<div class="empty">日志加载失败：${esc(e.message)}</div>`; }
 }
 function renderLogs() {
   const filter = $('log-filter')?.value || '';
-  const list = logEvents.filter(e => !filter || e.level === filter).slice(-300);
-  $('logbox').innerHTML = list.length ? list.map(e =>
-    `<div class="lv-${esc(e.level)}">[${fmtTime(e.ts)}] ${esc(e.level).toUpperCase()} ${esc(e.kind)}${e.req_id ? ' #' + esc(e.req_id) : ''} — ${esc(e.message)}</div>`
-  ).join('') : '<div class="empty">暂无日志</div>';
-  const box = $('logbox'); box.scrollTop = box.scrollHeight;
+  logEvents = (logEvents || []).filter(e => !filter || e.level === filter);
+  // 大列表 windowed 渲染（v0.8）：只渲染可视区 + 上下缓冲，>500 条不卡
+  const box = $('logbox');
+  if (!box) return;
+  const ROW_H = 22; // 单行日志近似高度（px）
+  const BUFFER = 40; // 上下缓冲行数
+  const viewport = box.clientHeight || 460;
+  const visible = Math.ceil(viewport / ROW_H) + BUFFER * 2;
+  const total = logEvents.length;
+  const topPad = Math.floor(box.scrollTop / ROW_H) || 0;
+  const start = Math.max(0, topPad - BUFFER);
+  const end = Math.min(total, start + visible);
+  const slice = logEvents.slice(start, end);
+  const html = total === 0
+    ? '<div class="empty">暂无日志</div>'
+    : `<div style="height:${start * ROW_H}px"></div>` + slice.map(e =>
+        `<div class="lv-${esc(e.level)}">[${fmtTime(e.ts)}] ${esc(e.level).toUpperCase()} ${esc(e.kind)}${e.req_id ? ' #' + esc(e.req_id) : ''} — ${esc(e.message)}</div>`
+      ).join('') + `<div style="height:${(total - end) * ROW_H}px"></div>`;
+  box.innerHTML = html;
+  // 是否跟随底部（自动滚动）：仅当此前贴在底部时保持跟随
+  const stick = box._stick !== false;
+  if (stick && total > 0) box.scrollTop = box.scrollHeight;
 }
 function clearLogs() { logEvents = []; renderLogs(); }
+// windowed 滚动监听（节流：滚动停止/变化时重渲染）
+function bindLogScroll() {
+  const box = $('logbox'); if (!box || box._scrollBound) return;
+  box._scrollBound = true;
+  box.addEventListener('scroll', () => {
+    box._stick = (box.scrollTop + box.clientHeight >= box.scrollHeight - 24);
+    // windowed 渲染生效（总量接近可视区+缓冲）后滚动才需要重渲染；
+    // 阈值与 renderLogs 的可见区算法对齐（≈ 底部缓冲区首个非可视行）
+    if (logEvents.length > 100) { clearTimeout(box._rt); box._rt = setTimeout(renderLogs, 60); }
+  }, { passive: true });
+}
 
 // ---------- 体检 ----------
 async function refreshDoctor() {
@@ -1322,8 +1566,13 @@ renderExtStatus();
   let tries = 0;
   const t = setInterval(() => { pingExtension(); if (++tries >= 5 || extId) clearInterval(t); }, 2000);
 })();
-// hash 路由：托盘「系统体检」→ /#doctor
+// hash 路由：托盘「系统体检」→ /#doctor（加载时 + hash 变化时均响应）
+function applyHashTab() {
+  const h = location.hash.replace(/^#/, '');
+  if (h && document.querySelector('nav button[data-tab="' + h + '"]')) showTab(h);
+}
 if (location.hash === '#doctor') showTab('doctor');
+window.addEventListener('hashchange', applyHashTab);
 startOverviewTimer();
 </script>
 </body>

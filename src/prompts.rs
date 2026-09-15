@@ -87,11 +87,31 @@ impl PromptManager {
     pub fn new() -> Self {
         let prompts = BUILTIN_PROMPTS
             .iter()
-            .map(|(id, name, content)| (id.to_string(), PromptConfig { id: id.to_string(), name: name.to_string(), content: content.to_string(), enabled: false }))
+            .map(|(id, name, content)| {
+                (
+                    id.to_string(),
+                    PromptConfig {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        content: content.to_string(),
+                        enabled: false,
+                    },
+                )
+            })
             .collect();
         let skills = BUILTIN_SKILLS
             .iter()
-            .map(|(id, name, content)| (id.to_string(), PromptConfig { id: id.to_string(), name: name.to_string(), content: content.to_string(), enabled: false }))
+            .map(|(id, name, content)| {
+                (
+                    id.to_string(),
+                    PromptConfig {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        content: content.to_string(),
+                        enabled: false,
+                    },
+                )
+            })
             .collect();
         Self {
             prompts: Arc::new(RwLock::new(prompts)),
@@ -171,7 +191,10 @@ impl PromptManager {
     pub async fn set_prompt_enabled(&self, id: &str, enabled: bool) -> bool {
         let mut p = self.prompts.write().await;
         match p.get_mut(id) {
-            Some(c) => { c.enabled = enabled; true }
+            Some(c) => {
+                c.enabled = enabled;
+                true
+            }
             None => false,
         }
     }
@@ -179,7 +202,10 @@ impl PromptManager {
     pub async fn set_skill_enabled(&self, id: &str, enabled: bool) -> bool {
         let mut s = self.skills.write().await;
         match s.get_mut(id) {
-            Some(c) => { c.enabled = enabled; true }
+            Some(c) => {
+                c.enabled = enabled;
+                true
+            }
             None => false,
         }
     }

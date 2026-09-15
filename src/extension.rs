@@ -7,11 +7,23 @@
 
 /// 文本类文件（zip 内路径 → 内容）
 const TEXT_FILES: &[(&str, &str)] = &[
-    ("manifest.json", include_str!("../browser-extension/manifest.json")),
-    ("background.js", include_str!("../browser-extension/background.js")),
+    (
+        "manifest.json",
+        include_str!("../browser-extension/manifest.json"),
+    ),
+    (
+        "background.js",
+        include_str!("../browser-extension/background.js"),
+    ),
     ("bridge.js", include_str!("../browser-extension/bridge.js")),
-    ("options.html", include_str!("../browser-extension/options.html")),
-    ("options.js", include_str!("../browser-extension/options.js")),
+    (
+        "options.html",
+        include_str!("../browser-extension/options.html"),
+    ),
+    (
+        "options.js",
+        include_str!("../browser-extension/options.js"),
+    ),
     ("README.md", include_str!("../browser-extension/README.md")),
 ];
 
@@ -55,7 +67,8 @@ fn dos_datetime() -> (u16, u16) {
     let now = chrono::Local::now();
     let year = (now.year().clamp(1980, 2107) - 1980) as u16;
     let date = (year << 9) | ((now.month() as u16) << 5) | (now.day() as u16);
-    let time = ((now.hour() as u16) << 11) | ((now.minute() as u16) << 5) | ((now.second() as u16) / 2);
+    let time =
+        ((now.hour() as u16) << 11) | ((now.minute() as u16) << 5) | ((now.second() as u16) / 2);
     (time, date)
 }
 
@@ -146,7 +159,11 @@ mod tests {
     fn zip_has_magic_and_eocd() {
         let z = build_zip();
         assert!(z.len() > 1000, "zip 太小，可能没打进扩展文件");
-        assert_eq!(&z[0..4], &[0x50, 0x4b, 0x03, 0x04], "缺少 zip 局部文件头魔数");
+        assert_eq!(
+            &z[0..4],
+            &[0x50, 0x4b, 0x03, 0x04],
+            "缺少 zip 局部文件头魔数"
+        );
         let eocd = &z[z.len() - 22..];
         assert_eq!(&eocd[0..4], &[0x50, 0x4b, 0x05, 0x06], "缺少 EOCD 魔数");
     }
@@ -173,6 +190,9 @@ mod tests {
     fn version_is_parsed_from_manifest() {
         let v = version();
         assert_ne!(v, "unknown", "未能从内嵌 manifest.json 解析出版本号");
-        assert!(v.chars().next().unwrap().is_ascii_digit(), "版本号格式异常: {v}");
+        assert!(
+            v.chars().next().unwrap().is_ascii_digit(),
+            "版本号格式异常: {v}"
+        );
     }
 }

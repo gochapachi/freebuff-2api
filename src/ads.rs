@@ -56,7 +56,10 @@ impl AdRefresher {
             },
             user_agent: crate::upstream::DESKTOP_UA.to_string(),
             placement_ids: vec![DESKTOP_BELOW_CHAT.to_string()],
-            ad_sequence_id: format!("agent:{}", uuid::Uuid::new_v4().to_string().replace('-', "")),
+            ad_sequence_id: format!(
+                "agent:{}",
+                uuid::Uuid::new_v4().to_string().replace('-', "")
+            ),
             surface: Some("cli_chat".into()),
         };
 

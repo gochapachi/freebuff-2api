@@ -75,7 +75,10 @@ pub struct FreeSessionResponse {
 
 impl FreeSessionResponse {
     pub fn instance_id(&self) -> Option<String> {
-        self.instance_id.as_ref().or(self.instance_id_alt.as_ref()).cloned()
+        self.instance_id
+            .as_ref()
+            .or(self.instance_id_alt.as_ref())
+            .cloned()
     }
 }
 
@@ -113,19 +116,31 @@ impl UpstreamClient {
         } else {
             base_url.trim_end_matches('/').to_string()
         };
-        Ok(Self { base_url, http, proxy, timeout: read_timeout })
+        Ok(Self {
+            base_url,
+            http,
+            proxy,
+            timeout: read_timeout,
+        })
     }
 
     fn auth_headers(&self, token: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}")).unwrap());
+        h.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
         h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         h.insert(USER_AGENT, HeaderValue::from_static(CODEBUFF_HEADER_UA));
         h
     }
 
     /// GET 会话状态（含 rateLimitsByModel）
-    pub async fn get_session(&self, token: &str, instance_id: Option<&str>) -> Result<FreeSessionResponse> {
+    pub async fn get_session(
+        &self,
+        token: &str,
+        instance_id: Option<&str>,
+    ) -> Result<FreeSessionResponse> {
         let mut headers = self.auth_headers(token);
         headers.insert(FREEBUFF_MULTI_SESSION, HeaderValue::from_static("1"));
         headers.insert(FREEBUFF_INCLUDE_UNUSED, HeaderValue::from_static("1"));
@@ -138,7 +153,13 @@ impl UpstreamClient {
     }
 
     /// POST 创建/刷新会话（x-freebuff-model 指定模型）
-    pub async fn create_session(&self, token: &str, model: &str, instance_id: Option<&str>, takeover: Option<&str>) -> Result<FreeSessionResponse> {
+    pub async fn create_session(
+        &self,
+        token: &str,
+        model: &str,
+        instance_id: Option<&str>,
+        takeover: Option<&str>,
+    ) -> Result<FreeSessionResponse> {
         let mut headers = self.auth_headers(token);
         headers.insert(FREEBUFF_MODEL_HEADER, HeaderValue::from_str(model)?);
         headers.insert(FREEBUFF_MULTI_SESSION, HeaderValue::from_static("1"));
@@ -149,7 +170,13 @@ impl UpstreamClient {
             headers.insert(FREEBUFF_TAKEOVER_HEADER, HeaderValue::from_str(t)?);
         }
         let url = format!("{}/api/v1/freebuff/session", self.base_url);
-        let resp = self.http.post(&url).headers(headers).body("{}").send().await?;
+        let resp = self
+            .http
+            .post(&url)
+            .headers(headers)
+            .body("{}")
+            .send()
+            .await?;
         parse_json_err(resp).await
     }
 
@@ -157,7 +184,10 @@ impl UpstreamClient {
     pub async fn heartbeat(&self, token: &str, instance_id: &str) -> Result<()> {
         let mut headers = self.auth_headers(token);
         headers.insert(FREEBUFF_MULTI_SESSION, HeaderValue::from_static("1"));
-        headers.insert(FREEBUFF_INSTANCE_HEADER, HeaderValue::from_str(instance_id)?);
+        headers.insert(
+            FREEBUFF_INSTANCE_HEADER,
+            HeaderValue::from_str(instance_id)?,
+        );
         headers.insert(FREEBUFF_HEARTBEAT, HeaderValue::from_static("1"));
         let url = format!("{}/api/v1/freebuff/session", self.base_url);
         let _ = self.http.get(&url).headers(headers).send().await?;
@@ -167,7 +197,10 @@ impl UpstreamClient {
     /// DELETE 释放会话
     pub async fn delete_session(&self, token: &str, instance_id: &str) -> Result<()> {
         let mut headers = self.auth_headers(token);
-        headers.insert(FREEBUFF_INSTANCE_HEADER, HeaderValue::from_str(instance_id)?);
+        headers.insert(
+            FREEBUFF_INSTANCE_HEADER,
+            HeaderValue::from_str(instance_id)?,
+        );
         headers.insert(FREEBUFF_MULTI_SESSION, HeaderValue::from_static("1"));
         let url = format!("{}/api/v1/freebuff/session", self.base_url);
         let resp = self.http.delete(&url).headers(headers).send().await?;
@@ -182,19 +215,36 @@ impl UpstreamClient {
     }
 
     /// 启动 run
-    pub async fn start_run(&self, token: &str, agent_id: &str, ancestors: &[String]) -> Result<String> {
+    pub async fn start_run(
+        &self,
+        token: &str,
+        agent_id: &str,
+        ancestors: &[String],
+    ) -> Result<String> {
         let body = serde_json::json!({
             "action": "START",
             "agentId": agent_id,
             "ancestorRunIds": ancestors,
         });
         let url = format!("{}/api/v1/agent-runs", self.base_url);
-        let resp = self.http.post(&url).headers(self.auth_headers(token)).json(&body).send().await?;
+        let resp = self
+            .http
+            .post(&url)
+            .headers(self.auth_headers(token))
+            .json(&body)
+            .send()
+            .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("start run HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
+            return Err(anyhow!(
+                "start run HTTP {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            ));
         }
         let parsed: StartRunResponse = resp.json().await?;
-        parsed.run_id().ok_or_else(|| anyhow!("start run 响应缺 runId"))
+        parsed
+            .run_id()
+            .ok_or_else(|| anyhow!("start run 响应缺 runId"))
     }
 
     /// 结束 run
@@ -208,7 +258,13 @@ impl UpstreamClient {
             "totalCredits": 0,
         });
         let url = format!("{}/api/v1/agent-runs", self.base_url);
-        let resp = self.http.post(&url).headers(self.auth_headers(token)).json(&body).send().await?;
+        let resp = self
+            .http
+            .post(&url)
+            .headers(self.auth_headers(token))
+            .json(&body)
+            .send()
+            .await?;
         let status = resp.status();
         if status.is_success() {
             return Ok(());
@@ -230,11 +286,17 @@ impl UpstreamClient {
         instance_id: Option<&str>,
     ) -> Result<reqwest::Response> {
         // 注入 codebuff_metadata
-        let mut metadata = body.get("codebuff_metadata").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let mut metadata = body
+            .get("codebuff_metadata")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
         if let Some(obj) = metadata.as_object_mut() {
             obj.insert("run_id".into(), serde_json::json!(run_id));
             obj.insert("cost_mode".into(), serde_json::json!("free"));
-            obj.insert("client_id".into(), serde_json::json!(generate_client_session_id()));
+            obj.insert(
+                "client_id".into(),
+                serde_json::json!(generate_client_session_id()),
+            );
             if let Some(id) = instance_id {
                 obj.insert("freebuff_instance_id".into(), serde_json::json!(id));
             }
@@ -242,16 +304,32 @@ impl UpstreamClient {
         body["codebuff_metadata"] = metadata;
 
         let url = format!("{}/api/v1/chat/completions", self.base_url);
-        let resp = self.http.post(&url).headers(self.auth_headers(token)).json(&body).send().await?;
+        let resp = self
+            .http
+            .post(&url)
+            .headers(self.auth_headers(token))
+            .json(&body)
+            .send()
+            .await?;
         Ok(resp)
     }
 
     /// 广告拍卖（网关侧从用户消息触发，换取免费额度）
     pub async fn request_ad(&self, token: &str, ad_session: &AdRequest) -> Result<AdResponse> {
         let url = format!("{}/api/v1/ads", self.base_url);
-        let resp = self.http.post(&url).headers(self.auth_headers(token)).json(ad_session).send().await?;
+        let resp = self
+            .http
+            .post(&url)
+            .headers(self.auth_headers(token))
+            .json(ad_session)
+            .send()
+            .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("ad fail HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
+            return Err(anyhow!(
+                "ad fail HTTP {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            ));
         }
         Ok(resp.json().await?)
     }
@@ -260,7 +338,13 @@ impl UpstreamClient {
     pub async fn confirm_impression(&self, token: &str, imp_url: &str) -> Result<()> {
         let body = serde_json::json!({ "impUrl": imp_url, "mode": "desktop", "userAgent": DESKTOP_UA, "os": "windows" });
         let url = format!("{}/api/v1/ads/impression", self.base_url);
-        let resp = self.http.post(&url).headers(self.auth_headers(token)).json(&body).send().await?;
+        let resp = self
+            .http
+            .post(&url)
+            .headers(self.auth_headers(token))
+            .json(&body)
+            .send()
+            .await?;
         if resp.status().is_success() {
             Ok(())
         } else {
@@ -346,9 +430,16 @@ async fn parse_json_err<T: for<'de> Deserialize<'de>>(resp: reqwest::Response) -
     if !status.is_success() {
         return Err(anyhow!("HTTP {}: {}", status, &text));
     }
-    serde_json::from_str(&text).map_err(|e| anyhow!("解析响应失败: {e} 原文: {}", text.chars().take(300).collect::<String>()))
+    serde_json::from_str(&text).map_err(|e| {
+        anyhow!(
+            "解析响应失败: {e} 原文: {}",
+            text.chars().take(300).collect::<String>()
+        )
+    })
 }
 
 pub fn parse_optional_time(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }

@@ -63,6 +63,14 @@ pub struct Config {
     pub web_dir: String,
     /// 启动时跳过上游连通性检查
     pub skip_upstream_check: bool,
+    /// 日志/遥测脱敏（默认开）：写入日志总线与遥测前把 Cookie/Bearer/authorization 值替换为 ***
+    pub redact_logs: bool,
+    /// 双桶并发信号量：免费层 {付费槽, 普通}
+    pub concurrency_free_slots: usize,
+    pub concurrency_free_multi: usize,
+    /// 双桶并发信号量：订阅层 {付费槽, 普通}
+    pub concurrency_sub_slots: usize,
+    pub concurrency_sub_multi: usize,
 }
 
 impl Default for Config {
@@ -97,6 +105,11 @@ impl Default for Config {
             max_roster_tokens: 2000,
             web_dir: String::new(),
             skip_upstream_check: false,
+            redact_logs: true,
+            concurrency_free_slots: 1,
+            concurrency_free_multi: 3,
+            concurrency_sub_slots: 3,
+            concurrency_sub_multi: 8,
         }
     }
 }
@@ -136,13 +149,22 @@ impl Config {
             self.upstream_base_url = v;
         }
         if let Ok(v) = env::var("AUTH_TOKENS") {
-            self.auth_tokens = v.split([',', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            self.auth_tokens = v
+                .split([',', '\n'])
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
         if let Ok(v) = env::var("API_KEYS") {
-            self.api_keys = v.split([',', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            self.api_keys = v
+                .split([',', '\n'])
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
         if let Ok(v) = env::var("ROTATION_INTERVAL") {
-            self.rotation_interval_sec = parse_duration_sec(&v).unwrap_or(self.rotation_interval_sec);
+            self.rotation_interval_sec =
+                parse_duration_sec(&v).unwrap_or(self.rotation_interval_sec);
         }
         if let Ok(v) = env::var("REQUEST_TIMEOUT") {
             self.request_timeout_sec = parse_duration_sec(&v).unwrap_or(self.request_timeout_sec);
@@ -151,7 +173,11 @@ impl Config {
             self.http_proxy = v;
         }
         if let Ok(v) = env::var("AD_PROVIDERS") {
-            self.ad_providers = v.split([',', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            self.ad_providers = v
+                .split([',', '\n'])
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
         if let Ok(v) = env::var("SQLITE_PATH") {
             self.sqlite_path = v;
@@ -172,7 +198,8 @@ impl Config {
             self.account_history_path = v;
         }
         if let Ok(v) = env::var("THREAD_CLEANUP_INTERVAL") {
-            self.thread_cleanup_interval_sec = parse_duration_sec(&v).unwrap_or(self.thread_cleanup_interval_sec);
+            self.thread_cleanup_interval_sec =
+                parse_duration_sec(&v).unwrap_or(self.thread_cleanup_interval_sec);
         }
         if let Ok(v) = env::var("THREAD_MAX_AGE_HOURS") {
             if let Ok(n) = v.parse() {
@@ -199,11 +226,38 @@ impl Config {
         if let Ok(v) = env::var("WEB_DIR") {
             self.web_dir = v;
         }
+        if let Ok(v) = env::var("REDACT_LOGS") {
+            self.redact_logs = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = env::var("CONCURRENCY_FREE_SLOTS") {
+            if let Ok(n) = v.parse() {
+                self.concurrency_free_slots = n;
+            }
+        }
+        if let Ok(v) = env::var("CONCURRENCY_FREE_MULTI") {
+            if let Ok(n) = v.parse() {
+                self.concurrency_free_multi = n;
+            }
+        }
+        if let Ok(v) = env::var("CONCURRENCY_SUB_SLOTS") {
+            if let Ok(n) = v.parse() {
+                self.concurrency_sub_slots = n;
+            }
+        }
+        if let Ok(v) = env::var("CONCURRENCY_SUB_MULTI") {
+            if let Ok(n) = v.parse() {
+                self.concurrency_sub_multi = n;
+            }
+        }
         if let Ok(v) = env::var("TOKEN_SAVER") {
             self.token_saver = v == "1" || v.eq_ignore_ascii_case("true");
         }
         if let Ok(v) = env::var("FALLBACK_MODELS") {
-            self.fallback_models = v.split([',', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            self.fallback_models = v
+                .split([',', '\n'])
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
     }
 
@@ -246,7 +300,9 @@ pub fn is_loopback_listen(listen_addr: &str) -> bool {
             .to_string()
     };
     matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1" | "[::1]")
-        || std::net::IpAddr::from_str(&host).map(|ip| ip.is_loopback()).unwrap_or(false)
+        || std::net::IpAddr::from_str(&host)
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 /// 解析配置文件路径：`--config x.json` > 第一个位置参数 > 当前目录 config.json > None

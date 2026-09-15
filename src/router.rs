@@ -89,9 +89,15 @@ impl ModelRouter {
 
     /// 模型支持的 efforts 范围（逆向自上游常量）；None = 不支持
     pub fn reasoning_efforts(&self, model: &str) -> Option<Vec<&'static str>> {
-        if model.starts_with("deepseek/") || model.starts_with("z-ai/glm") || model.starts_with("stealth/ox-alpha") {
+        if model.starts_with("deepseek/")
+            || model.starts_with("z-ai/glm")
+            || model.starts_with("stealth/ox-alpha")
+        {
             Some(vec!["low", "high", "max"])
-        } else if model.starts_with("openai/gpt-5.6") || model.starts_with("google/gemini-3.8") || model.starts_with("anthropic/claude-fable") {
+        } else if model.starts_with("openai/gpt-5.6")
+            || model.starts_with("google/gemini-3.8")
+            || model.starts_with("anthropic/claude-fable")
+        {
             Some(vec!["low", "medium", "high", "xhigh", "max"])
         } else if model.starts_with("meta/muse-spark") {
             Some(vec!["minimal", "low", "medium", "high", "xhigh"])
@@ -169,19 +175,34 @@ mod tests {
     fn clamp_effort_within_range_kept() {
         let r = router();
         // glm 支持 low/high/max
-        assert_eq!(r.clamp_effort("z-ai/glm-5.3-flash", "high").as_deref(), Some("high"));
-        assert_eq!(r.clamp_effort("z-ai/glm-5.3-flash", "low").as_deref(), Some("low"));
+        assert_eq!(
+            r.clamp_effort("z-ai/glm-5.3-flash", "high").as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            r.clamp_effort("z-ai/glm-5.3-flash", "low").as_deref(),
+            Some("low")
+        );
     }
 
     #[test]
     fn clamp_effort_over_range_downgrades() {
         let r = router();
         // glm 上限是 max，请求 xhigh → 取上限 max；gpt 支持到 max
-        assert_eq!(r.clamp_effort("z-ai/glm-5.3-flash", "xhigh").as_deref(), Some("max"));
+        assert_eq!(
+            r.clamp_effort("z-ai/glm-5.3-flash", "xhigh").as_deref(),
+            Some("max")
+        );
         // muse 上限 xhigh，请求 max → xhigh
-        assert_eq!(r.clamp_effort("meta/muse-spark-x", "max").as_deref(), Some("xhigh"));
+        assert_eq!(
+            r.clamp_effort("meta/muse-spark-x", "max").as_deref(),
+            Some("xhigh")
+        );
         // muse 下限 minimal，请求 low 有效但 minimal 是首项
-        assert_eq!(r.clamp_effort("meta/muse-spark-x", "minimal").as_deref(), Some("minimal"));
+        assert_eq!(
+            r.clamp_effort("meta/muse-spark-x", "minimal").as_deref(),
+            Some("minimal")
+        );
     }
 
     #[test]
@@ -196,7 +217,10 @@ mod tests {
     fn clamp_effort_unknown_value_falls_back() {
         let r = router();
         // 未知档位 → 取支持列表第一项
-        assert_eq!(r.clamp_effort("z-ai/glm-5.3-flash", "bogus").as_deref(), Some("low"));
+        assert_eq!(
+            r.clamp_effort("z-ai/glm-5.3-flash", "bogus").as_deref(),
+            Some("low")
+        );
     }
 
     #[test]

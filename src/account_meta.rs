@@ -141,7 +141,11 @@ impl AccountMetaStore {
         let meta_path = meta_path.into();
         let history_path = history_path.into();
         let cache = Self::load_meta(&meta_path);
-        Self { meta_path, history_path, cache: Mutex::new(cache) }
+        Self {
+            meta_path,
+            history_path,
+            cache: Mutex::new(cache),
+        }
     }
 
     fn load_meta(path: &PathBuf) -> HashMap<String, CredMeta> {
@@ -162,7 +166,10 @@ impl AccountMetaStore {
     /// 写入/更新一条快照并落盘（失败仅记日志，不影响主流程）
     pub fn upsert(&self, meta: CredMeta) -> Result<()> {
         {
-            let mut c = self.cache.lock().map_err(|_| anyhow::anyhow!("meta 缓存锁中毒"))?;
+            let mut c = self
+                .cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("meta 缓存锁中毒"))?;
             c.insert(meta.cred_id.clone(), meta);
         }
         self.flush()
@@ -171,7 +178,10 @@ impl AccountMetaStore {
     /// 删除某凭证的快照（凭证被移除时调用）
     pub fn remove(&self, cred_id: &str) -> Result<()> {
         {
-            let mut c = self.cache.lock().map_err(|_| anyhow::anyhow!("meta 缓存锁中毒"))?;
+            let mut c = self
+                .cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("meta 缓存锁中毒"))?;
             c.remove(cred_id);
         }
         self.flush()
@@ -181,7 +191,10 @@ impl AccountMetaStore {
     /// 消除 "锁外重拿锁 clone 旧快照后写盘" 的覆盖窗口。
     fn flush(&self) -> Result<()> {
         let json = {
-            let c = self.cache.lock().map_err(|_| anyhow::anyhow!("meta 缓存锁中毒"))?;
+            let c = self
+                .cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("meta 缓存锁中毒"))?;
             serde_json::to_string_pretty(&*c)?
         };
         atomic_write(&self.meta_path, &json)?;
@@ -193,11 +206,19 @@ impl AccountMetaStore {
         use std::io::Write;
         let line = serde_json::to_string(rec)?;
         let need_compact = {
-            let _g = HISTORY_LOCK.lock().map_err(|_| anyhow::anyhow!("history 锁中毒"))?;
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&self.history_path)?;
+            let _g = HISTORY_LOCK
+                .lock()
+                .map_err(|_| anyhow::anyhow!("history 锁中毒"))?;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.history_path)?;
             writeln!(f, "{line}")?;
             drop(f);
-            std::fs::metadata(&self.history_path).map(|m| m.len()).unwrap_or(0) > HISTORY_MAX_BYTES
+            std::fs::metadata(&self.history_path)
+                .map(|m| m.len())
+                .unwrap_or(0)
+                > HISTORY_MAX_BYTES
         };
         if need_compact {
             self.compact_history();
@@ -211,9 +232,17 @@ impl AccountMetaStore {
             Ok(g) => g,
             Err(_) => return,
         };
-        let Ok(text) = std::fs::read_to_string(&self.history_path) else { return };
+        let Ok(text) = std::fs::read_to_string(&self.history_path) else {
+            return;
+        };
         let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-        let keep: Vec<&str> = lines.iter().rev().take(HISTORY_KEEP).rev().copied().collect();
+        let keep: Vec<&str> = lines
+            .iter()
+            .rev()
+            .take(HISTORY_KEEP)
+            .rev()
+            .copied()
+            .collect();
         let mut out = keep.join("\n");
         out.push('\n');
         if atomic_write(&self.history_path, &out).is_ok() {
@@ -258,16 +287,30 @@ mod tests {
     #[test]
     fn upsert_and_reload() {
         let (store, dir) = tmp_store();
-        let meta = CredMeta { cred_id: "abc".into(), email: Some("a@b.c".into()), valid: true, checked_at: "t".into(), ..Default::default() };
+        let meta = CredMeta {
+            cred_id: "abc".into(),
+            email: Some("a@b.c".into()),
+            valid: true,
+            checked_at: "t".into(),
+            ..Default::default()
+        };
         store.upsert(meta).unwrap();
-        let reopened = AccountMetaStore::new(dir.path().join("cred_meta.json"), dir.path().join("h.jsonl"));
+        let reopened = AccountMetaStore::new(
+            dir.path().join("cred_meta.json"),
+            dir.path().join("h.jsonl"),
+        );
         assert_eq!(reopened.get("abc").unwrap().email.as_deref(), Some("a@b.c"));
     }
 
     #[test]
     fn remove_meta() {
         let (store, _d) = tmp_store();
-        store.upsert(CredMeta { cred_id: "x".into(), ..Default::default() }).unwrap();
+        store
+            .upsert(CredMeta {
+                cred_id: "x".into(),
+                ..Default::default()
+            })
+            .unwrap();
         store.remove("x").unwrap();
         assert!(store.get("x").is_none());
     }
@@ -278,9 +321,17 @@ mod tests {
         for (i, id) in [("1", "a"), ("2", "b"), ("3", "a")] {
             store
                 .append_history(&HistoryRecord {
-                    ts: i.into(), cred_id: id.into(), name: None, email: None, tier_id: None,
-                    daily_limit: None, daily_spent: None, daily_remaining: None,
-                    tokens_7d: None, streak_current: None, ok: true,
+                    ts: i.into(),
+                    cred_id: id.into(),
+                    name: None,
+                    email: None,
+                    tier_id: None,
+                    daily_limit: None,
+                    daily_spent: None,
+                    daily_remaining: None,
+                    tokens_7d: None,
+                    streak_current: None,
+                    ok: true,
                 })
                 .unwrap();
         }
@@ -297,11 +348,23 @@ mod tests {
         let (store, _d) = tmp_store();
         store
             .append_history(&HistoryRecord {
-                ts: "1".into(), cred_id: "a".into(), name: None, email: None, tier_id: None,
-                daily_limit: None, daily_spent: None, daily_remaining: None,
-                tokens_7d: None, streak_current: None, ok: true,
+                ts: "1".into(),
+                cred_id: "a".into(),
+                name: None,
+                email: None,
+                tier_id: None,
+                daily_limit: None,
+                daily_spent: None,
+                daily_remaining: None,
+                tokens_7d: None,
+                streak_current: None,
+                ok: true,
             })
             .unwrap();
-        assert_eq!(store.history(None, 0).unwrap().len(), 1, "limit 0 应被夹到 1");
+        assert_eq!(
+            store.history(None, 0).unwrap().len(),
+            1,
+            "limit 0 应被夹到 1"
+        );
     }
 }

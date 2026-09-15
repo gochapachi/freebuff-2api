@@ -46,7 +46,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(id UNINDEXED, title, 
 "#;
 
 /// 查询列顺序（与 [`row_to_memory`] 对应）
-const COLS: &str = "id,kind,title,content,scope,is_static,confidence,use_count,created_at,updated_at";
+const COLS: &str =
+    "id,kind,title,content,scope,is_static,confidence,use_count,created_at,updated_at";
 /// 检索排序：稳定事实优先，其后置信度 / 最近更新，id 决胜保证确定性
 const ORDER_BY: &str = "m.is_static DESC, m.confidence DESC, m.updated_at DESC, m.id ASC";
 
@@ -61,10 +62,23 @@ const CHARS_PER_TOKEN: usize = 2;
 /// 纠正 / 偏好指令标记（中英，大小写不敏感）
 const CORRECTION_MARKERS: &[&str] = &[
     // 中文指令式短语（带标点/上下文，降低误报）
-    "记住：", "记住:", "记住，", "以后都", "别再", "不要再", "下次要", "以后要",
+    "记住：",
+    "记住:",
+    "记住，",
+    "以后都",
+    "别再",
+    "不要再",
+    "下次要",
+    "以后要",
     // 英文指令式短语（避免 always/never 单独命中造成的误报）
-    "remember that", "remember to", "remember:", "always use", "never use",
-    "don't use", "do not use", "from now on",
+    "remember that",
+    "remember to",
+    "remember:",
+    "always use",
+    "never use",
+    "don't use",
+    "do not use",
+    "from now on",
 ];
 
 /// 用户记忆库（独立 SQLite 连接，WAL）
@@ -154,7 +168,13 @@ impl MemoryStore {
     }
 
     /// 显式写入（用户手动添加）；同 title 近重复则 supersede 更新
-    pub fn upsert(&self, kind: &str, title: &str, content: &str, is_static: bool) -> Result<Memory> {
+    pub fn upsert(
+        &self,
+        kind: &str,
+        title: &str,
+        content: &str,
+        is_static: bool,
+    ) -> Result<Memory> {
         let title = title.trim();
         if title.is_empty() {
             anyhow::bail!("记忆标题不能为空");
@@ -295,7 +315,9 @@ impl MemoryStore {
     pub fn stats(&self) -> Result<serde_json::Value> {
         let conn = self.lock_conn()?;
         let total: i64 =
-            conn.query_row("SELECT COUNT(*) FROM memories WHERE is_latest=1", [], |r| r.get(0))?;
+            conn.query_row("SELECT COUNT(*) FROM memories WHERE is_latest=1", [], |r| {
+                r.get(0)
+            })?;
         let static_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM memories WHERE is_latest=1 AND is_static=1",
             [],
@@ -347,7 +369,9 @@ impl MemoryStore {
                 sync_fts(&conn, &id, title, content)?;
                 Ok(id)
             }
-            None => insert_memory(&conn, kind, title, content, "user", is_static, confidence, None),
+            None => insert_memory(
+                &conn, kind, title, content, "user", is_static, confidence, None,
+            ),
         }
     }
 
@@ -446,7 +470,8 @@ fn query_terms(conn: &Connection, terms: &[String], top_k: usize) -> Result<Vec<
     let pats: Vec<String> = (0..TERM_SLOTS)
         .map(|i| like_pattern(&terms[i % terms.len()]))
         .collect();
-    let params_vec: Vec<&dyn rusqlite::ToSql> = pats.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+    let params_vec: Vec<&dyn rusqlite::ToSql> =
+        pats.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
     let rows = stmt.query_map(params_vec.as_slice(), row_to_memory)?;
     let mut scored: Vec<(usize, Memory)> = Vec::new();
     for r in rows {
@@ -454,7 +479,11 @@ fn query_terms(conn: &Connection, terms: &[String], top_k: usize) -> Result<Vec<
         let hay = format!("{} {}", m.title.to_lowercase(), m.content.to_lowercase());
         let score = terms
             .iter()
-            .filter(|t| hay.contains(t.as_str()) || m.title.contains(t.as_str()) || m.content.contains(t.as_str()))
+            .filter(|t| {
+                hay.contains(t.as_str())
+                    || m.title.contains(t.as_str())
+                    || m.content.contains(t.as_str())
+            })
             .count();
         if score > 0 {
             scored.push((score, m));
@@ -512,7 +541,10 @@ fn fts_phrase(q: &str) -> String {
 
 /// LIKE 模式：转义 `\` `%` `_` 后包裹 `%...%`
 fn like_pattern(q: &str) -> String {
-    let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let escaped = q
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
     format!("%{escaped}%")
 }
 
@@ -626,7 +658,13 @@ fn escape_marker(s: &str) -> String {
     // 1) Unicode 行分隔符归一化为空格（防多行伪造）
     let normalized: String = s
         .chars()
-        .map(|c| if c == '\u{2028}' || c == '\u{2029}' { ' ' } else { c })
+        .map(|c| {
+            if c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     // 2) 大小写不敏感替换（to_ascii_lowercase 保持字节长度不变，索引安全）
     let lowered = normalized.to_ascii_lowercase();
@@ -705,7 +743,9 @@ mod tests {
     #[test]
     fn observe_detects_correction_patterns() {
         let (_dir, store) = test_store();
-        let ids = store.observe("", None, "不对，以后都用中文回答", None).unwrap();
+        let ids = store
+            .observe("", None, "不对，以后都用中文回答", None)
+            .unwrap();
         assert_eq!(ids.len(), 1);
         let rows = store.list(10);
         assert_eq!(rows.len(), 1);
@@ -714,7 +754,9 @@ mod tests {
         assert!(rows[0].title.contains("用户纠正"));
 
         // 英文模式 + 大小写不敏感
-        let ids = store.observe("", None, "Remember: ALWAYS use tabs", None).unwrap();
+        let ids = store
+            .observe("", None, "Remember: ALWAYS use tabs", None)
+            .unwrap();
         assert_eq!(ids.len(), 1);
         let rows = store.list(10);
         assert_eq!(rows.len(), 2);
@@ -728,8 +770,12 @@ mod tests {
     #[test]
     fn upsert_supersedes_duplicate_title() {
         let (_dir, store) = test_store();
-        let first = store.upsert("preference", "回答语言", "用英文", true).unwrap();
-        let second = store.upsert("preference", "回答语言", "用中文", true).unwrap();
+        let first = store
+            .upsert("preference", "回答语言", "用英文", true)
+            .unwrap();
+        let second = store
+            .upsert("preference", "回答语言", "用中文", true)
+            .unwrap();
         assert_ne!(first.id, second.id);
 
         let listed = store.list(10);
@@ -739,7 +785,9 @@ mod tests {
 
         let conn = store.conn.lock().unwrap();
         let latest: i64 = conn
-            .query_row("SELECT COUNT(*) FROM memories WHERE is_latest=1", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM memories WHERE is_latest=1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(latest, 1);
         let parent: Option<String> = conn
@@ -749,7 +797,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(parent.as_deref(), Some(first.id.as_str()), "新版本应指向旧版本");
+        assert_eq!(
+            parent.as_deref(),
+            Some(first.id.as_str()),
+            "新版本应指向旧版本"
+        );
         drop(conn); // 释放锁后再走 API（Mutex 不可重入）
 
         // 旧版本不再被检索命中
@@ -783,9 +835,13 @@ mod tests {
         let (_dir, store) = test_store();
         assert_eq!(store.brief("任意查询", 100), "", "无命中应为空串");
 
-        store.upsert("preference", "记忆短", "短内容", true).unwrap();
+        store
+            .upsert("preference", "记忆短", "短内容", true)
+            .unwrap();
         let long_content = "很长".repeat(300);
-        store.upsert("preference", "记忆长", &long_content, true).unwrap();
+        store
+            .upsert("preference", "记忆长", &long_content, true)
+            .unwrap();
 
         // 预算 10 tokens ≈ 20 字符：只能容纳短条目，长条目整条丢弃
         let out = store.brief("记忆", 10);
@@ -883,8 +939,12 @@ mod tests {
     #[test]
     fn search_prefers_static_facts() {
         let (_dir, store) = test_store();
-        let dynamic = store.upsert("habit", "动态偏好", "用户常问周报模板", false).unwrap();
-        let stable = store.upsert("preference", "稳定偏好", "用户喜欢周报格式", true).unwrap();
+        let dynamic = store
+            .upsert("habit", "动态偏好", "用户常问周报模板", false)
+            .unwrap();
+        let stable = store
+            .upsert("preference", "稳定偏好", "用户喜欢周报格式", true)
+            .unwrap();
 
         let hits = store.search("周报", 5);
         assert_eq!(hits.len(), 2);
@@ -928,7 +988,10 @@ mod tests {
             "我的 key 是 sk-abcdef123456 和 Bearer eyJhbGciOiJIUzI1NiJ9.abc，另外 password=hunter2xx",
         );
         assert!(!s.contains("sk-abcdef123456"), "sk- 密钥应被遮蔽: {s}");
-        assert!(!s.contains("eyJhbGciOiJIUzI1NiJ9.abc"), "Bearer 应被遮蔽: {s}");
+        assert!(
+            !s.contains("eyJhbGciOiJIUzI1NiJ9.abc"),
+            "Bearer 应被遮蔽: {s}"
+        );
         assert!(!s.contains("hunter2xx"), "password= 应被遮蔽: {s}");
         assert!(s.contains("[已脱敏]"));
         // 正常文本不受影响
@@ -969,7 +1032,9 @@ mod tests {
         let listed = store.list(10);
         assert!(listed.iter().any(|m| m.kind == "correction"), "应记录纠正");
         assert!(
-            !listed.iter().any(|m| m.content.contains("super-secret-value123")),
+            !listed
+                .iter()
+                .any(|m| m.content.contains("super-secret-value123")),
             "纠正内容不得含明文密钥: {:?}",
             listed.iter().map(|m| &m.content).collect::<Vec<_>>()
         );
@@ -981,7 +1046,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(dir.path().join("m.sqlite")).unwrap();
         store
-            .upsert("preference", "语言偏好", "用户要求以后都用中文回答，代码注释也用中文", true)
+            .upsert(
+                "preference",
+                "语言偏好",
+                "用户要求以后都用中文回答，代码注释也用中文",
+                true,
+            )
             .unwrap();
         let hits = store.search("请记住用户要求以后都用中文回答我的问题", 5);
         assert!(!hits.is_empty(), "中文长句检索应命中（3-gram 降级）");
@@ -989,7 +1059,14 @@ mod tests {
         assert!(brief.contains("中文"), "brief 应包含命中的记忆: {brief}");
 
         // 英文长句
-        store.upsert("preference", "包管理器", "always use pnpm in this repo", true).unwrap();
+        store
+            .upsert(
+                "preference",
+                "包管理器",
+                "always use pnpm in this repo",
+                true,
+            )
+            .unwrap();
         let hits2 = store.search("which package manager should I use for this repository", 5);
         assert!(!hits2.is_empty(), "英文长句应命中（词组降级）");
     }

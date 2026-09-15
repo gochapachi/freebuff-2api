@@ -14,6 +14,23 @@ const fs = require('node:fs');
 const GATEWAY_PORT = 47821;
 const GATEWAY_URL = `http://127.0.0.1:${GATEWAY_PORT}`;
 
+// 多开保护（v0.8）：二次启动不重复拉起网关，激活已有窗口并聚焦
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    // 已有实例收到二次启动信号 → 显示主窗口并带到前台
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+      // 若网关尚未就绪，托盘/窗口已可打开控制台
+      writeLog('[app] 收到二次启动信号，激活已有窗口');
+    }
+  });
+}
+
 let gateway = null;
 let mainWindow = null;
 let tray = null;
@@ -190,6 +207,18 @@ function openConsole() {
   else mainWindow.show();
 }
 
+// 打开控制台并跳转到指定 tab（hash 路由，避免全页 loadURL 导致的刷新/丢失会话）
+function openConsoleAt(hashTab) {
+  openConsole();
+  if (mainWindow) {
+    const apply = () => { try { mainWindow.webContents.executeJavaScript(`location.hash='#${hashTab}'`); } catch (_) { /* 忽略 */ } };
+    const wc = mainWindow.webContents;
+    // 页面尚未加载完时挂 did-finish-load，否则立即设置
+    if (wc && wc.isLoading()) wc.once('did-finish-load', apply);
+    else apply();
+  }
+}
+
 function createTray() {
   const icon = path.join(__dirname, 'icons', 'icon.png');
   let trayIcon = nativeImage.createFromPath(icon);
@@ -202,7 +231,7 @@ function createTray() {
     { label: '打开控制台', click: openConsole },
     { label: '➕ 一键登录新账号', click: openLoginWindow },
     { type: 'separator' },
-    { label: '🩺 系统体检', click: () => { openConsole(); if (mainWindow) mainWindow.loadURL(`http://127.0.0.1:${configuredPort()}/#doctor`); } },
+    { label: '🩺 系统体检', click: () => { openConsoleAt('doctor'); } },
     { label: '📄 打开日志', click: () => { shell.openPath(logPath()); } },
     { label: '⚙️ 打开配置', click: () => { shell.showItemInFolder(path.join(app.getPath('userData'), 'config.json')); } },
     { label: '📁 打开数据目录', click: () => { shell.openPath(app.getPath('userData')); } },

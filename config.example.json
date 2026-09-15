@@ -14,7 +14,7 @@
   "tokens_path": "data/tokens.json",
   "telemetry_path": "data/telemetry.sqlite",
   "memory_path": "data/memory.sqlite",
-  "memory_enabled": true,
+  "memory_enabled": false,
   "threads_path": "data/threads.json",
   "cred_meta_path": "data/cred_meta.json",
   "account_history_path": "data/account_history.jsonl",
@@ -25,5 +25,10 @@
   "skills_inject_mode": "roster",
   "max_roster_tokens": 2000,
   "web_dir": "",
-  "skip_upstream_check": true
+  "skip_upstream_check": true,
+  "redact_logs": true,
+  "concurrency_free_slots": 1,
+  "concurrency_free_multi": 3,
+  "concurrency_sub_slots": 3,
+  "concurrency_sub_multi": 8
 }

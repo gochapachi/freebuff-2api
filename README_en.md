@@ -8,7 +8,7 @@ Freebuff2API reverse-engineers the [Freebuff](https://freebuff.com) free tier in
 
 - Dual protocol: `POST /v1/chat/completions` (OpenAI) + `POST /v1/messages` (Claude)
 - Multi-account rotation: health-scored pool with cooldown/circuit-breaking
-- Dual-bucket concurrency (reverse-engineered from desktop): free `{slot:1, multi:3}`, subscriber `{slot:3, multi:8}`
+- Dual-bucket concurrency semaphore (reverse-engineered from desktop, implemented in v0.8): free `{slot:1, concurrency:3}`, subscriber `{slot:3, concurrency:8}` — gateway-global. Each request takes 1 slot + 1 concurrent permit → real concurrency cap = slot capacity (free 1, subscriber 3), 2s timeout → 429
 - Session keepalive: 45s heartbeat + ad-based quota refresh
 - Reasoning-effort downgrade (from upstream efforts field)
 - Balance/quota query: `GET /api/account/balance` (freebucks, per-model daily remaining)
@@ -20,7 +20,7 @@ Freebuff2API reverse-engineers the [Freebuff](https://freebuff.com) free tier in
 ## Quick Start
 
 ### Desktop (recommended)
-Download `Freebuff2API Setup 0.3.0.exe` from Releases → install → launch → gateway auto-starts → dashboard opens. Use tray "Login new account" to auto-capture cookies.
+Download the latest `Freebuff2API Setup x64.exe` from Releases (currently v0.8.x) → install → launch → gateway auto-starts → dashboard opens. Use tray "Login new account" to auto-capture cookies.
 
 ### Source
 ```bash

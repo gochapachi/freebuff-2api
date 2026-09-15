@@ -56,7 +56,10 @@ const agents = {
     // 内联 Set/数组可解析
     assert!(parsed.contains_key("base2-free"));
     assert!(parsed.contains_key("basher"));
-    assert!(parsed.get("basher").unwrap().contains(&"z-ai/glm-5.3-flash".to_string()));
+    assert!(parsed
+        .get("basher")
+        .unwrap()
+        .contains(&"z-ai/glm-5.3-flash".to_string()));
     // 常量引用无法内联解析（上游已改用常量，回归时由硬编码清单兜底）
     assert!(!parsed.contains_key("researcher-web"));
 }
@@ -78,10 +81,28 @@ fn usage_db_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.sqlite").to_str().unwrap().to_string();
     let db = UsageDb::open(&path).unwrap();
-    db.record("token-1", "z-ai/glm-5.3-flash", 100, 50, 200, 200, "sk-test", "127.0.0.1")
-        .unwrap();
-    db.record("token-1", "z-ai/glm-5.3-flash", 10, 5, 100, 500, "sk-test", "127.0.0.1")
-        .unwrap();
+    db.record(
+        "token-1",
+        "z-ai/glm-5.3-flash",
+        100,
+        50,
+        200,
+        200,
+        "sk-test",
+        "127.0.0.1",
+    )
+    .unwrap();
+    db.record(
+        "token-1",
+        "z-ai/glm-5.3-flash",
+        10,
+        5,
+        100,
+        500,
+        "sk-test",
+        "127.0.0.1",
+    )
+    .unwrap();
 
     let totals = db.totals().unwrap();
     assert_eq!(totals["total_requests"], 2);
@@ -100,7 +121,10 @@ fn usage_db_roundtrip() {
 #[test]
 fn timeout_env_duration() {
     // 回归：REQUEST_TIMEOUT=15m 应解析为 900s
-    let cfg = Config { request_timeout_sec: parse_duration_sec("15m").unwrap(), ..Default::default() };
+    let cfg = Config {
+        request_timeout_sec: parse_duration_sec("15m").unwrap(),
+        ..Default::default()
+    };
     assert_eq!(cfg.request_timeout_sec, 900);
     assert_eq!(config_timeout_sec(), 900);
 }
@@ -118,14 +142,26 @@ fn pool_pick_best_and_cooldown() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let cfg = Config { skip_upstream_check: true, ..Default::default() };
+        let cfg = Config {
+            skip_upstream_check: true,
+            ..Default::default()
+        };
         let client = Arc::new(
-            UpstreamClient::new("https://www.codebuff.com".into(), None, Duration::from_secs(30)).unwrap(),
+            UpstreamClient::new(
+                "https://www.codebuff.com".into(),
+                None,
+                Duration::from_secs(30),
+            )
+            .unwrap(),
         );
         let mk = |name: &str, token: &str| AccountEntry {
             name: name.into(),
             token: token.into(),
-            session: Arc::new(SessionManager::new(client.clone(), token.into(), cfg.clone())),
+            session: Arc::new(SessionManager::new(
+                client.clone(),
+                token.into(),
+                cfg.clone(),
+            )),
             score: tokio::sync::RwLock::new(0.0),
             breaker: tokio::sync::RwLock::new(freebuff2api::pool::CircuitBreaker::new()),
         };
@@ -144,7 +180,8 @@ fn pool_pick_best_and_cooldown() {
         assert_eq!(best.name, "a2");
 
         // 冷却后应被跳过，回落到 a1
-        pool.mark_cooldown("a2", Duration::from_secs(600), "test").await;
+        pool.mark_cooldown("a2", Duration::from_secs(600), "test")
+            .await;
         let best2 = pool.pick_best().await.unwrap();
         assert_eq!(best2.name, "a1");
 

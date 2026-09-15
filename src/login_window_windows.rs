@@ -48,17 +48,15 @@ pub fn run_login_window(gateway_port: Option<u16>) -> i32 {
 fn run_login_window_inner(gateway_port: Option<u16>) -> Result<String> {
     use wry::WebViewBuilder;
 
-    let ports: Vec<u16> = gateway_port
-        .map(|p| vec![p])
-        .unwrap_or_else(|| {
-            // GATEWAY_PORT 环境变量优先（网关 spawn 时会带）；否则按默认序列探测
-            if let Ok(p) = std::env::var("GATEWAY_PORT") {
-                if let Ok(p) = p.parse() {
-                    return vec![p];
-                }
+    let ports: Vec<u16> = gateway_port.map(|p| vec![p]).unwrap_or_else(|| {
+        // GATEWAY_PORT 环境变量优先（网关 spawn 时会带）；否则按默认序列探测
+        if let Ok(p) = std::env::var("GATEWAY_PORT") {
+            if let Ok(p) = p.parse() {
+                return vec![p];
             }
-            GATEWAY_PORTS.to_vec()
-        });
+        }
+        GATEWAY_PORTS.to_vec()
+    });
 
     // tao 的 EventLoop::new() 失败时内部自行 panic（官方示例同款用法）
     let event_loop = tao::event_loop::EventLoop::new();
@@ -71,14 +69,13 @@ fn run_login_window_inner(gateway_port: Option<u16>) -> Result<String> {
     let webview = WebViewBuilder::new()
         .with_url("https://freebuff.com/")
         .build(&window)
-        .map_err(|e| anyhow!("初始化 WebView2 失败: {e}（请确认系统已安装 Microsoft Edge WebView2 Runtime）"))?;
+        .map_err(|e| {
+            anyhow!("初始化 WebView2 失败: {e}（请确认系统已安装 Microsoft Edge WebView2 Runtime）")
+        })?;
 
     // 抓取当前 Cookie 并尝试入库；返回 Some((exit_code, message)) 表示流程已终结。
     // 独立函数（借 webview），供"首载探测"与"事件循环轮询"两处复用——规避 run() 的 'static 闭包约束。
-    fn try_capture(
-        webview: &wry::WebView,
-        ports: &[u16],
-    ) -> Option<(i32, String)> {
+    fn try_capture(webview: &wry::WebView, ports: &[u16]) -> Option<(i32, String)> {
         let Ok(cookies) = webview.cookies_for_url("https://freebuff.com/") else {
             return None;
         };
@@ -104,7 +101,10 @@ fn run_login_window_inner(gateway_port: Option<u16>) -> Result<String> {
                 }
             }
         }
-        Some((1, format!("无法连接本机网关（尝试端口 {ports:?}）——请确认网关已启动")))
+        Some((
+            1,
+            format!("无法连接本机网关（尝试端口 {ports:?}）——请确认网关已启动"),
+        ))
     }
 
     // 首次加载即探测一次（用户可能带着有效会话直接进来）
@@ -117,7 +117,10 @@ fn run_login_window_inner(gateway_port: Option<u16>) -> Result<String> {
     event_loop.run(move |event, _, control_flow| {
         use tao::event::Event::*;
         match event {
-            WindowEvent { event: tao::event::WindowEvent::CloseRequested, .. } => {
+            WindowEvent {
+                event: tao::event::WindowEvent::CloseRequested,
+                ..
+            } => {
                 report(1, "窗口已关闭但未完成登录（可重试，或改用扩展/手动导入）");
             }
             NewEvents(..) => {
@@ -179,7 +182,11 @@ fn post_import(port: u16, cookie: &str) -> Result<usize> {
     let status = resp.status();
     let text = futures::executor::block_on(resp.text()).unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("HTTP {}：{}", status, text.chars().take(160).collect::<String>());
+        anyhow::bail!(
+            "HTTP {}：{}",
+            status,
+            text.chars().take(160).collect::<String>()
+        );
     }
     let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
     Ok(v.get("added").and_then(|a| a.as_u64()).unwrap_or(0) as usize)
@@ -230,7 +237,8 @@ pub fn spawn_login_window(gateway_port: u16) -> bool {
                     });
                     let path = std::path::Path::new("data");
                     if path.exists() {
-                        let _ = std::fs::write(path.join("login_window_result.json"), msg.to_string());
+                        let _ =
+                            std::fs::write(path.join("login_window_result.json"), msg.to_string());
                     }
                 }
             });

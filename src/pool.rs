@@ -112,7 +112,9 @@ impl CircuitBreaker {
         self.probing = false;
         match self.state {
             CircuitState::HalfOpen => self.trip(reason),
-            CircuitState::Closed if self.consecutive_failures >= FAILURE_THRESHOLD => self.trip(reason),
+            CircuitState::Closed if self.consecutive_failures >= FAILURE_THRESHOLD => {
+                self.trip(reason)
+            }
             _ => {}
         }
     }
@@ -206,7 +208,11 @@ impl Pool {
             .map(|(i, token)| AccountEntry {
                 name: format!("token-{}", i + 1),
                 token: token.clone(),
-                session: Arc::new(SessionManager::new(client.clone(), token.clone(), cfg.clone())),
+                session: Arc::new(SessionManager::new(
+                    client.clone(),
+                    token.clone(),
+                    cfg.clone(),
+                )),
                 score: RwLock::new(0.0),
                 breaker: RwLock::new(CircuitBreaker::new()),
             })
@@ -288,7 +294,10 @@ impl Pool {
             let sess = acc.session.snapshot().await;
             let healthy = breaker.state == CircuitState::Closed
                 || (breaker.state == CircuitState::Open
-                    && breaker.open_until.map(|u| Instant::now() >= u).unwrap_or(true));
+                    && breaker
+                        .open_until
+                        .map(|u| Instant::now() >= u)
+                        .unwrap_or(true));
             snapshot_accounts.push(AccountSnapshot {
                 name: acc.name.clone(),
                 healthy,
@@ -404,7 +413,10 @@ mod tests {
         }
         let cd = b.open_until.unwrap() - Instant::now();
         // 第 5 次：1<<4 = 16 倍 → 960s 被 MAX_COOLDOWN(600s) 截断
-        assert!(cd > Duration::from_secs(550), "第 5 次应接近 10 分钟封顶: {cd:?}");
+        assert!(
+            cd > Duration::from_secs(550),
+            "第 5 次应接近 10 分钟封顶: {cd:?}"
+        );
         assert!(cd <= MAX_COOLDOWN);
     }
 

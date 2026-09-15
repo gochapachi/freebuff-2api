@@ -39,7 +39,10 @@ fn session_seed(cookie: &str) -> String {
         .split(';')
         .map(str::trim)
         .find(|p| p.starts_with("__Secure-next-auth.session-token="))
-        .map(|p| p.trim_start_matches("__Secure-next-auth.session-token=").to_string())
+        .map(|p| {
+            p.trim_start_matches("__Secure-next-auth.session-token=")
+                .to_string()
+        })
         .unwrap_or_else(|| cookie.to_string())
 }
 
@@ -66,6 +69,8 @@ pub struct WebClient {
     http: reqwest::Client,
     pub cookie: String,
     pub model: String,
+    /// 上游 host（默认 WEB_HOST；测试可注入本地 Mock 地址）
+    base_host: String,
     /// 按 Cookie 派生的实例 id（上游 `x-freebuff-instance-id`；同账号稳定、跨账号不同）
     instance_id: String,
     /// 最近一次流中上游 meta/title 事件给出的 threadId（多轮续聊用）。
@@ -82,7 +87,11 @@ pub struct WebClient {
 /// 而 `rename_all` 只作用于变体名，故必须用 `rename_all_fields` 映射字段名，
 /// 否则带下划线的字段会静默落为 None。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ChatEvent {
     Meta {
         #[serde(default)]
@@ -213,9 +222,15 @@ impl GravityContext {
         let v2 = fnv1a64(&format!("{seed}#client-ctx"));
         let mut ctx = Self::default();
         ctx.user_data.visitor_id = format!("gruid_{v:016x}{:08x}", v.rotate_left(21));
-        ctx.user_data.session_id = format!("gr_sess_{:016x}{:08x}", v.rotate_right(13), v ^ 0x9E37_79B9_7F4A_7C15);
+        ctx.user_data.session_id = format!(
+            "gr_sess_{:016x}{:08x}",
+            v.rotate_right(13),
+            v ^ 0x9E37_79B9_7F4A_7C15
+        );
         // 客户端环境也按账号派生：所有账号共用同一套 screen/viewport/hardware 同样是可识别特征
-        let pick = |salt: u64, lo: u64, hi: u64| -> u64 { lo + (fnv1a64(&format!("{seed}#{salt}")) % (hi - lo + 1)) };
+        let pick = |salt: u64, lo: u64, hi: u64| -> u64 {
+            lo + (fnv1a64(&format!("{seed}#{salt}")) % (hi - lo + 1))
+        };
         let screen_w = pick(1, 1366, 2560);
         let screen_h = pick(2, 768, 1440);
         let viewport_w = pick(3, 1024, 1600);
@@ -248,7 +263,8 @@ impl GravityContext {
 }
 
 impl Default for GravityContext {
-    fn default() -> Self {        Self {
+    fn default() -> Self {
+        Self {
             user_data: GravityUserData {
                 visitor_id: "gruid_20uznrh75l83tnm3".into(),
                 session_id: "gr_sess_5o0e95gndmgtdd5l".into(),
@@ -278,6 +294,11 @@ impl Default for GravityContext {
 
 impl WebClient {
     pub fn new(cookie: String, model: String) -> Result<Self> {
+        Self::with_host(cookie, model, WEB_HOST)
+    }
+
+    /// 指定上游 host 构造（默认 `WEB_HOST`；测试用本地 Mock 地址覆盖）
+    pub fn with_host(cookie: String, model: String, base_host: &str) -> Result<Self> {
         // 流式响应不受整体 timeout 影响：reqwest 的 .timeout() 是「总请求」超时，对流式会截断
         // （v0.7.3 修复：此前 300s 总超时会把仍在增量的长流硬生生掐断，客户端表现为
         //  ERR_INCOMPLETE_CHUNKED_ENCODING）。与 upstream.rs 同款做法：read_timeout =
@@ -293,6 +314,7 @@ impl WebClient {
             http,
             cookie,
             model,
+            base_host: base_host.trim_end_matches('/').to_string(),
             instance_id,
             last_thread_id: Arc::new(Mutex::new(None)),
             last_upstream_error: Arc::new(Mutex::new(None)),
@@ -327,7 +349,10 @@ impl WebClient {
             h.insert("cookie", v);
         }
         h.insert("origin", HeaderValue::from_static("https://freebuff.com"));
-        h.insert("referer", HeaderValue::from_static("https://freebuff.com/chat"));
+        h.insert(
+            "referer",
+            HeaderValue::from_static("https://freebuff.com/chat"),
+        );
         h.insert("accept", HeaderValue::from_static("*/*"));
         // 上游网页版每个请求都会带这个头（高级功能.txt:610/804）；缺失是最容易被风控识别的差异
         if let Ok(v) = HeaderValue::from_str(&self.instance_id) {
@@ -361,10 +386,20 @@ impl WebClient {
             "images": images,
             "attachments": attachments,
         });
-        let url = format!("{WEB_HOST}/api/chat/stream");
-        let resp = self.http.post(&url).headers(self.headers(true)).json(&body).send().await?;
+        let url = format!("{}/api/chat/stream", self.base_host);
+        let resp = self
+            .http
+            .post(&url)
+            .headers(self.headers(true))
+            .json(&body)
+            .send()
+            .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("web chat HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
+            return Err(anyhow!(
+                "web chat HTTP {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            ));
         }
 
         let byte_stream = resp.bytes_stream();
@@ -372,42 +407,62 @@ impl WebClient {
         // 每路流独立的转换器：tool_calls index 分配 + threadId 记录 + 上游内嵌错误旁路
         let error_slot = self.error_slot();
         let encoder = StreamEncoder::new(self.thread_slot(), error_slot);
-        let stream = futures::stream::unfold((byte_stream, sse_buf, false, encoder), |(mut stream, mut buf, finished, mut enc)| async move {
-            if finished { return None; }
-            loop {
-                match stream.next().await {
-                    Some(Ok(chunk)) => {
-                        buf.extend_from_slice(&chunk);
-                        // 切出完整事件块（空行分隔），逐块转 OpenAI chunk（真实增量）
-                        let mut out_line = String::new();
-                        let mut got_done = false;
-                        while let Some(pos) = find_double_newline(&buf) {
-                            let event_bytes: Vec<u8> = buf.drain(..pos).collect();
-                            let block = String::from_utf8_lossy(&event_bytes);
-                            let (text, done) = enc.encode_block(&block);
-                            out_line.push_str(&text);
-                            if done { got_done = true; break; }
+        let stream = futures::stream::unfold(
+            (byte_stream, sse_buf, false, encoder),
+            |(mut stream, mut buf, finished, mut enc)| async move {
+                if finished {
+                    return None;
+                }
+                loop {
+                    match stream.next().await {
+                        Some(Ok(chunk)) => {
+                            buf.extend_from_slice(&chunk);
+                            // 切出完整事件块（空行分隔），逐块转 OpenAI chunk（真实增量）
+                            let mut out_line = String::new();
+                            let mut got_done = false;
+                            while let Some(pos) = find_double_newline(&buf) {
+                                let event_bytes: Vec<u8> = buf.drain(..pos).collect();
+                                let block = String::from_utf8_lossy(&event_bytes);
+                                let (text, done) = enc.encode_block(&block);
+                                out_line.push_str(&text);
+                                if done {
+                                    got_done = true;
+                                    break;
+                                }
+                            }
+                            if got_done {
+                                // encode_block 已输出 finish_reason chunk + [DONE]
+                                return Some((
+                                    Ok::<_, std::io::Error>(axum::body::Bytes::from(out_line)),
+                                    (stream, buf, true, enc),
+                                ));
+                            }
+                            if !out_line.is_empty() {
+                                return Some((
+                                    Ok::<_, std::io::Error>(axum::body::Bytes::from(out_line)),
+                                    (stream, buf, false, enc),
+                                ));
+                            }
+                            // buf 已无完整事件，继续收下一个 chunk
                         }
-                        if got_done {
-                            // encode_block 已输出 finish_reason chunk + [DONE]
-                            return Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(out_line)), (stream, buf, true, enc)));
+                        Some(Err(e)) => {
+                            return Some((
+                                Err::<_, std::io::Error>(std::io::Error::other(e.to_string())),
+                                (stream, buf, false, enc),
+                            ));
                         }
-                        if !out_line.is_empty() {
-                            return Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(out_line)), (stream, buf, false, enc)));
+                        None => {
+                            // 上游结束但没收到 done → 补发 finish_reason chunk + [DONE]
+                            let out = format!("{}data: [DONE]\n\n", enc.finish_chunk());
+                            return Some((
+                                Ok::<_, std::io::Error>(axum::body::Bytes::from(out)),
+                                (stream, buf, true, enc),
+                            ));
                         }
-                        // buf 已无完整事件，继续收下一个 chunk
-                    }
-                    Some(Err(e)) => {
-                        return Some((Err::<_, std::io::Error>(std::io::Error::other(e.to_string())), (stream, buf, false, enc)));
-                    }
-                    None => {
-                        // 上游结束但没收到 done → 补发 finish_reason chunk + [DONE]
-                        let out = format!("{}data: [DONE]\n\n", enc.finish_chunk());
-                        return Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(out)), (stream, buf, true, enc)));
                     }
                 }
-            }
-        });
+            },
+        );
         Ok(axum::body::Body::from_stream(stream))
     }
 
@@ -429,10 +484,20 @@ impl WebClient {
             "images": images,
             "attachments": attachments,
         });
-        let url = format!("{WEB_HOST}/api/chat/stream");
-        let resp = self.http.post(&url).headers(self.headers(true)).json(&body).send().await?;
+        let url = format!("{}/api/chat/stream", self.base_host);
+        let resp = self
+            .http
+            .post(&url)
+            .headers(self.headers(true))
+            .json(&body)
+            .send()
+            .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("web chat HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
+            return Err(anyhow!(
+                "web chat HTTP {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            ));
         }
         let mut result = StreamResult::default();
         let mut stream = resp.bytes_stream();
@@ -475,20 +540,41 @@ impl WebClient {
         mime: &str,
         model: &str,
     ) -> Result<WebUploadResult> {
-        let url = format!("{WEB_HOST}/api/chat/upload");
+        let url = format!("{}/api/chat/upload", self.base_host);
         let form = reqwest::multipart::Form::new()
-            .part("file", reqwest::multipart::Part::bytes(file_bytes).file_name(filename.to_string()).mime_str(mime)?)
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(file_bytes)
+                    .file_name(filename.to_string())
+                    .mime_str(mime)?,
+            )
             .text("model", model.to_string());
-        let resp = self.http.post(&url).headers(self.headers(false)).multipart(form).send().await?;
+        let resp = self
+            .http
+            .post(&url)
+            .headers(self.headers(false))
+            .multipart(form)
+            .send()
+            .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("upload HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
+            return Err(anyhow!(
+                "upload HTTP {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            ));
         }
         Ok(resp.json().await?)
     }
 
     /// 上传文件（multipart）→ storageId（使用客户端配置的默认 model）
-    pub async fn upload(&self, file_bytes: Vec<u8>, filename: &str, mime: &str) -> Result<WebUploadResult> {
-        self.upload_with_model(file_bytes, filename, mime, &self.model).await
+    pub async fn upload(
+        &self,
+        file_bytes: Vec<u8>,
+        filename: &str,
+        mime: &str,
+    ) -> Result<WebUploadResult> {
+        self.upload_with_model(file_bytes, filename, mime, &self.model)
+            .await
     }
 
     /// 删除上游会话（用户批注：反代不能长期堆积给上游制造压力）。
@@ -502,8 +588,13 @@ impl WebClient {
     ///
     /// 返回 `Ok(true)` 表示上游确认删除；`Ok(false)` 表示上游明确说找不到；其他失败返回 `Err`。
     pub async fn delete_thread(&self, thread_id: &str) -> Result<bool> {
-        let url = format!("{WEB_HOST}/api/chat/threads/{thread_id}");
-        let resp = self.http.delete(&url).headers(self.headers(false)).send().await?;
+        let url = format!("{}/api/chat/threads/{thread_id}", self.base_host);
+        let resp = self
+            .http
+            .delete(&url)
+            .headers(self.headers(false))
+            .send()
+            .await?;
         let status = resp.status();
         if status.is_success() {
             return Ok(true);
@@ -517,44 +608,74 @@ impl WebClient {
 
     /// 查询账号积分/每模型限额（web 版核心余额端点）
     pub async fn freebuff_session(&self) -> Result<WebFreebuffSession> {
-        let url = format!("{WEB_HOST}/api/web/freebuff-session");
-        let resp = self.http.get(&url).headers(self.headers(false)).send().await?;
+        let url = format!("{}/api/web/freebuff-session", self.base_host);
+        let resp = self
+            .http
+            .get(&url)
+            .headers(self.headers(false))
+            .send()
+            .await?;
         parse_json(resp).await
     }
 
     /// 用量汇总（streak/tokens/sessionsByModel）
     pub async fn usage_summary(&self) -> Result<serde_json::Value> {
-        let url = format!("{WEB_HOST}/api/web/usage-summary");
-        let resp = self.http.get(&url).headers(self.headers(false)).send().await?;
+        let url = format!("{}/api/web/usage-summary", self.base_host);
+        let resp = self
+            .http
+            .get(&url)
+            .headers(self.headers(false))
+            .send()
+            .await?;
         parse_json(resp).await
     }
 
     /// 用户信息
     pub async fn auth_session(&self) -> Result<serde_json::Value> {
-        let url = format!("{WEB_HOST}/api/auth/session");
-        let resp = self.http.get(&url).headers(self.headers(false)).send().await?;
+        let url = format!("{}/api/auth/session", self.base_host);
+        let resp = self
+            .http
+            .get(&url)
+            .headers(self.headers(false))
+            .send()
+            .await?;
         parse_json(resp).await
     }
 
     /// 套餐
     pub async fn subscriptions(&self) -> Result<serde_json::Value> {
-        let url = format!("{WEB_HOST}/api/web/subscriptions");
-        let resp = self.http.get(&url).headers(self.headers(false)).send().await?;
+        let url = format!("{}/api/web/subscriptions", self.base_host);
+        let resp = self
+            .http
+            .get(&url)
+            .headers(self.headers(false))
+            .send()
+            .await?;
         parse_json(resp).await
     }
 
     /// 会话列表
     pub async fn threads(&self) -> Result<serde_json::Value> {
-        let url = format!("{WEB_HOST}/api/chat/threads");
-        let resp = self.http.get(&url).headers(self.headers(false)).send().await?;
+        let url = format!("{}/api/chat/threads", self.base_host);
+        let resp = self
+            .http
+            .get(&url)
+            .headers(self.headers(false))
+            .send()
+            .await?;
         parse_json(resp).await
     }
 
     /// 短期 JWT（GET /api/web/convex-token；含 email/name/access_tier/country_code，约 5 分钟有效）
     /// 用途：验证凭证有效性 / 保活。
     pub async fn convex_token(&self) -> Result<serde_json::Value> {
-        let url = format!("{WEB_HOST}/api/web/convex-token");
-        let resp = self.http.get(&url).headers(self.headers(false)).send().await?;
+        let url = format!("{}/api/web/convex-token", self.base_host);
+        let resp = self
+            .http
+            .get(&url)
+            .headers(self.headers(false))
+            .send()
+            .await?;
         parse_json(resp).await
     }
 }
@@ -671,7 +792,14 @@ struct StreamEncoder {
 
 impl StreamEncoder {
     fn new(thread_id: Arc<Mutex<Option<String>>>, error_slot: Arc<Mutex<Option<String>>>) -> Self {
-        Self { tool_index: HashMap::new(), next_tool_index: 0, has_tool_calls: false, thread_id, upstream_error: None, _error_slot: error_slot }
+        Self {
+            tool_index: HashMap::new(),
+            next_tool_index: 0,
+            has_tool_calls: false,
+            thread_id,
+            upstream_error: None,
+            _error_slot: error_slot,
+        }
     }
 
     /// 读取上游内嵌错误（若有）。取后不清——同一错误重复读取得到同一结果。
@@ -701,7 +829,11 @@ impl StreamEncoder {
 
     /// 终止 chunk：content 为空，finish_reason 按是否出现工具调用取 tool_calls/stop。
     fn finish_chunk(&self) -> String {
-        let reason = if self.has_tool_calls { "tool_calls" } else { "stop" };
+        let reason = if self.has_tool_calls {
+            "tool_calls"
+        } else {
+            "stop"
+        };
         format!(
             "data: {}\n\n",
             serde_json::json!({ "object": "chat.completion.chunk", "choices": [{ "index": 0, "delta": {}, "finish_reason": reason }] })
@@ -717,15 +849,22 @@ impl StreamEncoder {
         let mut done = false;
         for line in block.lines() {
             let line = line.trim();
-            let Some(json) = line.strip_prefix("data:") else { continue };
+            let Some(json) = line.strip_prefix("data:") else {
+                continue;
+            };
             let json = json.trim();
-            if json.is_empty() || json == "[DONE]" { continue; }
+            if json.is_empty() || json == "[DONE]" {
+                continue;
+            }
             // 检测点前移（Critic-J P2-1）：先探 error envelope（含反序列化会失败的未知事件），
             // 桥接层的 tail 只含转换后 chunk，看不到这里——这是上游内嵌错误的唯一可见点
             if self.upstream_error.is_none() {
                 if let Ok(raw) = serde_json::from_str::<serde_json::Value>(json) {
                     if let Some(err) = raw.get("error") {
-                        let text = err.as_str().map(String::from).unwrap_or_else(|| err.to_string());
+                        let text = err
+                            .as_str()
+                            .map(String::from)
+                            .unwrap_or_else(|| err.to_string());
                         self.upstream_error = Some(text.clone());
                         if let Ok(mut slot) = self._error_slot.lock() {
                             *slot = Some(text); // 旁路槽：桥接层流结束后可读
@@ -733,13 +872,21 @@ impl StreamEncoder {
                     }
                 }
             }
-            let Ok(event) = serde_json::from_str::<ChatEvent>(json) else { continue };
+            let Ok(event) = serde_json::from_str::<ChatEvent>(json) else {
+                continue;
+            };
             match event {
                 ChatEvent::Delta { text } => text_parts.push(text),
                 // 抓包证据：工具产出的正文在 agent_delta 中，必须作为 content 透传
-                ChatEvent::AgentDelta { text: Some(text), .. } => text_parts.push(text),
+                ChatEvent::AgentDelta {
+                    text: Some(text), ..
+                } => text_parts.push(text),
                 ChatEvent::ReasoningDelta { text } => reasoning_parts.push(text),
-                ChatEvent::AgentTool { tool_name: Some(name), tool_call_id, .. } => {
+                ChatEvent::AgentTool {
+                    tool_name: Some(name),
+                    tool_call_id,
+                    ..
+                } => {
                     let (index, id) = self.tool_slot(tool_call_id.as_deref());
                     self.has_tool_calls = true;
                     tool_parts.push(serde_json::json!({
@@ -758,13 +905,22 @@ impl StreamEncoder {
         }
         let mut out = String::new();
         for r in reasoning_parts {
-            out += &format!("data: {}\n\n", serde_json::json!({ "object": "chat.completion.chunk", "choices": [{ "index": 0, "delta": { "reasoning_content": r }, "finish_reason": null }] }));
+            out += &format!(
+                "data: {}\n\n",
+                serde_json::json!({ "object": "chat.completion.chunk", "choices": [{ "index": 0, "delta": { "reasoning_content": r }, "finish_reason": null }] })
+            );
         }
         for t in text_parts {
-            out += &format!("data: {}\n\n", serde_json::json!({ "object": "chat.completion.chunk", "choices": [{ "index": 0, "delta": { "content": t }, "finish_reason": null }] }));
+            out += &format!(
+                "data: {}\n\n",
+                serde_json::json!({ "object": "chat.completion.chunk", "choices": [{ "index": 0, "delta": { "content": t }, "finish_reason": null }] })
+            );
         }
         for tc in &tool_parts {
-            out += &format!("data: {}\n\n", serde_json::json!({ "object": "chat.completion.chunk", "choices": [{ "index": 0, "delta": { "tool_calls": [tc] }, "finish_reason": null }] }));
+            out += &format!(
+                "data: {}\n\n",
+                serde_json::json!({ "object": "chat.completion.chunk", "choices": [{ "index": 0, "delta": { "tool_calls": [tc] }, "finish_reason": null }] })
+            );
         }
         if done {
             out += &self.finish_chunk();
@@ -786,38 +942,71 @@ fn record_thread_id(slot: &Mutex<Option<String>>, id: Option<&str>) {
 /// 聚合路径的事件归并（`chat_stream`）。
 fn apply_event(result: &mut StreamResult, event: ChatEvent) {
     match event {
-        ChatEvent::Meta { thread_id, title, model, access_tier } => {
-            if let Some(t) = thread_id { result.thread_id = Some(t); }
+        ChatEvent::Meta {
+            thread_id,
+            title,
+            model,
+            access_tier,
+        } => {
+            if let Some(t) = thread_id {
+                result.thread_id = Some(t);
+            }
             // title 二次更新：流中途由用户原文覆盖为模型摘要，后到覆盖
-            if let Some(t) = title { result.title = Some(t); }
-            if result.model.is_none() { result.model = model; }
-            if result.access_tier.is_none() { result.access_tier = access_tier; }
+            if let Some(t) = title {
+                result.title = Some(t);
+            }
+            if result.model.is_none() {
+                result.model = model;
+            }
+            if result.access_tier.is_none() {
+                result.access_tier = access_tier;
+            }
         }
         ChatEvent::Title { thread_id, title } => {
-            if let Some(t) = thread_id { result.thread_id = Some(t); }
-            if let Some(t) = title { result.title = Some(t); }
+            if let Some(t) = thread_id {
+                result.thread_id = Some(t);
+            }
+            if let Some(t) = title {
+                result.title = Some(t);
+            }
         }
         ChatEvent::ReasoningDelta { text } => result.reasoning.push_str(&text),
         ChatEvent::Delta { text } => result.text.push_str(&text),
         // 工具产出的正文（agent_delta）与普通 delta 同通道，不能丢弃
-        ChatEvent::AgentDelta { text: Some(text), .. } => result.text.push_str(&text),
+        ChatEvent::AgentDelta {
+            text: Some(text), ..
+        } => result.text.push_str(&text),
         ChatEvent::Suggestions { followups, .. } => result.suggestions = followups,
-        ChatEvent::AgentTool { tool_name: Some(name), tool_call_id, label, .. } => {
+        ChatEvent::AgentTool {
+            tool_name: Some(name),
+            tool_call_id,
+            label,
+            ..
+        } => {
             let raw = match tool_call_id.filter(|s| !s.is_empty()) {
                 Some(id) => id,
                 None => format!("anon_{}", result.tool_calls.len()),
             };
             let label = label.unwrap_or_default();
             result.tools.push(format!("{name}: {label}"));
-            result.tool_calls.push(ToolCallState { id: format!("call_{raw}"), name, label, done: false });
+            result.tool_calls.push(ToolCallState {
+                id: format!("call_{raw}"),
+                name,
+                label,
+                done: false,
+            });
         }
-        ChatEvent::AgentToolDone { tool_call_id: Some(id) } => {
+        ChatEvent::AgentToolDone {
+            tool_call_id: Some(id),
+        } => {
             let id = format!("call_{id}");
             if let Some(tc) = result.tool_calls.iter_mut().find(|t| t.id == id) {
                 tc.done = true;
             }
         }
-        ChatEvent::AgentStart { agent_type, .. } => result.tools.push(format!("agent_start: {}", agent_type.unwrap_or_default())),
+        ChatEvent::AgentStart { agent_type, .. } => result
+            .tools
+            .push(format!("agent_start: {}", agent_type.unwrap_or_default())),
         ChatEvent::Done => result.done = true,
         _ => {}
     }
@@ -839,7 +1028,10 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(resp: reqwest::Response) -> Re
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!("HTTP {status}: {}", text.chars().take(300).collect::<String>()));
+        return Err(anyhow!(
+            "HTTP {status}: {}",
+            text.chars().take(300).collect::<String>()
+        ));
     }
     serde_json::from_str(&text).map_err(|e| anyhow!("解析响应失败: {e}"))
 }
@@ -860,7 +1052,9 @@ mod tests {
             let block: Vec<u8> = buf.drain(..pos).collect();
             let (text, done) = enc.encode_block(&String::from_utf8_lossy(&block));
             out.push_str(&text);
-            if done { break; }
+            if done {
+                break;
+            }
         }
         out
     }
@@ -883,12 +1077,16 @@ mod tests {
     #[test]
     fn agent_delta_maps_to_content_delta() {
         let mut enc = StreamEncoder::new(new_slot(), new_slot());
-        let (out, done) = enc.encode_block("data: {\"type\":\"agent_delta\",\"agentId\":\"a1\",\"text\":\"工具结果\"}\n\n");
+        let (out, done) = enc.encode_block(
+            "data: {\"type\":\"agent_delta\",\"agentId\":\"a1\",\"text\":\"工具结果\"}\n\n",
+        );
         assert!(!done);
         let cs = chunks(&out);
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0]["choices"][0]["delta"]["content"], "工具结果");
-        assert!(cs[0]["choices"][0]["delta"].get("reasoning_content").is_none());
+        assert!(cs[0]["choices"][0]["delta"]
+            .get("reasoning_content")
+            .is_none());
     }
 
     #[test]
@@ -900,7 +1098,10 @@ mod tests {
             "data: {\"type\":\"delta\",\"text\":\"C\"}\n\n",
         );
         let cs = chunks(&drive(&mut enc, raw.as_bytes()));
-        let text: String = cs.iter().map(|c| c["choices"][0]["delta"]["content"].as_str().unwrap_or("")).collect();
+        let text: String = cs
+            .iter()
+            .map(|c| c["choices"][0]["delta"]["content"].as_str().unwrap_or(""))
+            .collect();
         assert_eq!(text, "ABC");
     }
 
@@ -935,7 +1136,14 @@ mod tests {
         );
         let cs = chunks(&drive(&mut enc, raw.as_bytes()));
         assert_eq!(cs.len(), 3);
-        let idx: Vec<i64> = cs.iter().map(|c| c["choices"][0]["delta"]["tool_calls"][0]["index"].as_i64().unwrap()).collect();
+        let idx: Vec<i64> = cs
+            .iter()
+            .map(|c| {
+                c["choices"][0]["delta"]["tool_calls"][0]["index"]
+                    .as_i64()
+                    .unwrap()
+            })
+            .collect();
         assert_eq!(idx, vec![0, 1, 0], "同一 toolCallId 必须复用 index");
     }
 
@@ -947,9 +1155,27 @@ mod tests {
             "data: {\"type\":\"agent_tool\",\"toolName\":\"read_url\"}\n\n",
         );
         let cs = chunks(&drive(&mut enc, raw.as_bytes()));
-        let ids: Vec<String> = cs.iter().map(|c| c["choices"][0]["delta"]["tool_calls"][0]["id"].as_str().unwrap().to_string()).collect();
-        assert_eq!(ids, vec!["call_anon_0".to_string(), "call_anon_1".to_string()]);
-        let idx: Vec<i64> = cs.iter().map(|c| c["choices"][0]["delta"]["tool_calls"][0]["index"].as_i64().unwrap()).collect();
+        let ids: Vec<String> = cs
+            .iter()
+            .map(|c| {
+                c["choices"][0]["delta"]["tool_calls"][0]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["call_anon_0".to_string(), "call_anon_1".to_string()]
+        );
+        let idx: Vec<i64> = cs
+            .iter()
+            .map(|c| {
+                c["choices"][0]["delta"]["tool_calls"][0]["index"]
+                    .as_i64()
+                    .unwrap()
+            })
+            .collect();
         assert_eq!(idx, vec![0, 1]);
     }
 
@@ -963,11 +1189,18 @@ mod tests {
             "data: {\"type\":\"done\"}\n\n",
         );
         let out = drive(&mut enc, raw.as_bytes());
-        assert!(out.ends_with("data: [DONE]\n\n"), "done 后必须发 [DONE] 哨兵");
+        assert!(
+            out.ends_with("data: [DONE]\n\n"),
+            "done 后必须发 [DONE] 哨兵"
+        );
         let cs = chunks(&out);
         let last = cs.last().unwrap();
         assert_eq!(last["choices"][0]["finish_reason"], "tool_calls");
-        assert_eq!(last["choices"][0]["delta"], serde_json::json!({}), "终止 chunk 的 delta 必须为空");
+        assert_eq!(
+            last["choices"][0]["delta"],
+            serde_json::json!({}),
+            "终止 chunk 的 delta 必须为空"
+        );
     }
 
     #[test]
@@ -1011,7 +1244,11 @@ mod tests {
 
     #[test]
     fn web_client_exposes_last_thread_id() {
-        let client = WebClient::new("__Secure-next-auth.session-token=x".into(), "glm-5.3-flash".into()).unwrap();
+        let client = WebClient::new(
+            "__Secure-next-auth.session-token=x".into(),
+            "glm-5.3-flash".into(),
+        )
+        .unwrap();
         assert_eq!(client.last_thread_id(), None);
         let mut enc = StreamEncoder::new(client.thread_slot(), new_slot());
         enc.encode_block("data: {\"type\":\"meta\",\"threadId\":\"th-1\",\"title\":\"t\"}\n\n");
@@ -1023,11 +1260,31 @@ mod tests {
     #[test]
     fn aggregate_title_late_update_wins() {
         let mut r = StreamResult::default();
-        apply_event(&mut r, ChatEvent::Meta { thread_id: Some("t".into()), title: Some("用户原文".into()), model: None, access_tier: None });
-        apply_event(&mut r, ChatEvent::Title { thread_id: Some("t".into()), title: Some("模型摘要".into()) });
+        apply_event(
+            &mut r,
+            ChatEvent::Meta {
+                thread_id: Some("t".into()),
+                title: Some("用户原文".into()),
+                model: None,
+                access_tier: None,
+            },
+        );
+        apply_event(
+            &mut r,
+            ChatEvent::Title {
+                thread_id: Some("t".into()),
+                title: Some("模型摘要".into()),
+            },
+        );
         assert_eq!(r.title.as_deref(), Some("模型摘要"));
         // 新值为 None 时不得清空旧值
-        apply_event(&mut r, ChatEvent::Title { thread_id: None, title: None });
+        apply_event(
+            &mut r,
+            ChatEvent::Title {
+                thread_id: None,
+                title: None,
+            },
+        );
         assert_eq!(r.title.as_deref(), Some("模型摘要"));
     }
 
@@ -1035,7 +1292,13 @@ mod tests {
     fn aggregate_agent_delta_appends_content() {
         let mut r = StreamResult::default();
         apply_event(&mut r, ChatEvent::Delta { text: "A".into() });
-        apply_event(&mut r, ChatEvent::AgentDelta { agent_id: Some("a".into()), text: Some("B".into()) });
+        apply_event(
+            &mut r,
+            ChatEvent::AgentDelta {
+                agent_id: Some("a".into()),
+                text: Some("B".into()),
+            },
+        );
         apply_event(&mut r, ChatEvent::ReasoningDelta { text: "R".into() });
         assert_eq!(r.text, "AB");
         assert_eq!(r.reasoning, "R");
@@ -1044,13 +1307,21 @@ mod tests {
     #[test]
     fn aggregate_tool_call_id_prefixed_and_done_marked() {
         let mut r = StreamResult::default();
-        apply_event(&mut r, ChatEvent::AgentTool {
-            agent_id: None,
-            tool_call_id: Some("t1".into()),
-            tool_name: Some("web_search".into()),
-            label: Some("github".into()),
-        });
-        apply_event(&mut r, ChatEvent::AgentToolDone { tool_call_id: Some("t1".into()) });
+        apply_event(
+            &mut r,
+            ChatEvent::AgentTool {
+                agent_id: None,
+                tool_call_id: Some("t1".into()),
+                tool_name: Some("web_search".into()),
+                label: Some("github".into()),
+            },
+        );
+        apply_event(
+            &mut r,
+            ChatEvent::AgentToolDone {
+                tool_call_id: Some("t1".into()),
+            },
+        );
         assert_eq!(r.tool_calls.len(), 1);
         assert_eq!(r.tool_calls[0].id, "call_t1");
         assert!(r.tool_calls[0].done);
@@ -1084,13 +1355,26 @@ mod tests {
         assert_eq!(slot.lock().unwrap().clone(), Some("d8557501".to_string()));
         let cs = chunks(&out);
         // 正文 = delta + agent_delta（工具产出不得丢失）
-        let text: String = cs.iter().map(|c| c["choices"][0]["delta"]["content"].as_str().unwrap_or("")).collect();
+        let text: String = cs
+            .iter()
+            .map(|c| c["choices"][0]["delta"]["content"].as_str().unwrap_or(""))
+            .collect();
         assert_eq!(text, "我来Based on research。");
         // 推理单独走 reasoning_content
-        let reasoning: String = cs.iter().map(|c| c["choices"][0]["delta"]["reasoning_content"].as_str().unwrap_or("")).collect();
+        let reasoning: String = cs
+            .iter()
+            .map(|c| {
+                c["choices"][0]["delta"]["reasoning_content"]
+                    .as_str()
+                    .unwrap_or("")
+            })
+            .collect();
         assert_eq!(reasoning, "The");
         // 工具调用存在且 index 正确
-        let tc = cs.iter().find_map(|c| c["choices"][0]["delta"]["tool_calls"].as_array().cloned()).unwrap();
+        let tc = cs
+            .iter()
+            .find_map(|c| c["choices"][0]["delta"]["tool_calls"].as_array().cloned())
+            .unwrap();
         assert_eq!(tc[0]["index"], 0);
         assert_eq!(tc[0]["id"], "call_c1");
         // 终止 chunk
@@ -1112,7 +1396,8 @@ mod tests {
     #[test]
     fn crlf_stream_is_split_correctly() {
         let mut enc = StreamEncoder::new(new_slot(), new_slot());
-        let raw = "data: {\"type\":\"delta\",\"text\":\"hi\"}\r\n\r\ndata: {\"type\":\"done\"}\r\n\r\n";
+        let raw =
+            "data: {\"type\":\"delta\",\"text\":\"hi\"}\r\n\r\ndata: {\"type\":\"done\"}\r\n\r\n";
         let out = drive(&mut enc, raw.as_bytes());
         assert_eq!(chunks(&out).len(), 2);
         assert!(out.ends_with("data: [DONE]\n\n"));
@@ -1128,7 +1413,10 @@ mod tests {
         .unwrap();
         assert_eq!(v.kind, "image");
         assert_eq!(v.storage_id, "kg278");
-        assert_eq!(v.url.as_deref(), Some("https://harmless-tapir-303.convex.cloud/api/storage/c45e"));
+        assert_eq!(
+            v.url.as_deref(),
+            Some("https://harmless-tapir-303.convex.cloud/api/storage/c45e")
+        );
         assert_eq!(v.description_storage_id.as_deref(), Some("kg2ay"));
         assert!(v.chars.is_none() && v.truncated.is_none());
     }
@@ -1148,29 +1436,45 @@ mod tests {
     /// 上游 200 内嵌错误旁路（Critic-J P2-1 闭环）：error envelope 在 encode_block 中被捕获
     #[test]
     fn upstream_error_bypass_captured() {
-        let client = WebClient::new("__Secure-next-auth.session-token=x".into(), "glm-5.3-flash".into()).unwrap();
+        let client = WebClient::new(
+            "__Secure-next-auth.session-token=x".into(),
+            "glm-5.3-flash".into(),
+        )
+        .unwrap();
         let mut enc = StreamEncoder::new(client.thread_slot(), client.error_slot());
         // 反序列化会失败的纯 error envelope（无 type 字段）
-        let (out, _) = enc.encode_block("data: {\"error\":\"Unauthorized\"}
+        let (out, _) = enc.encode_block(
+            "data: {\"error\":\"Unauthorized\"}
 
-");
+",
+        );
         assert!(out.is_empty(), "错误事件不应产生输出");
-        assert_eq!(client.last_upstream_error().as_deref(), Some("Unauthorized"), "旁路槽必须能读到（桥接层唯一可见点）");
+        assert_eq!(
+            client.last_upstream_error().as_deref(),
+            Some("Unauthorized"),
+            "旁路槽必须能读到（桥接层唯一可见点）"
+        );
         // 已知事件变体携带额外 error 字段
         let mut enc2 = StreamEncoder::new(new_slot(), new_slot());
-        enc2.encode_block("data: {\"type\":\"meta\",\"error\":\"rate limited\"}
+        enc2.encode_block(
+            "data: {\"type\":\"meta\",\"error\":\"rate limited\"}
 
-");
+",
+        );
         assert_eq!(client_cases(enc2), Some("rate limited".to_string()));
     }
 
-    fn client_cases(enc: StreamEncoder) -> Option<String> { enc.take_upstream_error() }
+    fn client_cases(enc: StreamEncoder) -> Option<String> {
+        enc.take_upstream_error()
+    }
 
     /// 未映射事件（button/unknown）不得产生任何输出、不得报错
     #[test]
     fn unknown_events_are_ignored() {
         let mut enc = StreamEncoder::new(new_slot(), new_slot());
-        let (out, done) = enc.encode_block("data: {\"type\":\"button\"}\n\ndata: {\"type\":\"brand_new_event\",\"x\":1}\n\n");
+        let (out, done) = enc.encode_block(
+            "data: {\"type\":\"button\"}\n\ndata: {\"type\":\"brand_new_event\",\"x\":1}\n\n",
+        );
         assert!(out.is_empty());
         assert!(!done);
     }
@@ -1180,7 +1484,11 @@ mod tests {
         let c1 = "__Secure-next-auth.session-token=aaa-bbb; other=1";
         let c2 = "__Secure-next-auth.session-token=ccc-ddd; other=1";
         let a = instance_id_for_cookie(c1);
-        assert_eq!(a, instance_id_for_cookie(c1), "同账号必须稳定（否则每次重启都是新设备）");
+        assert_eq!(
+            a,
+            instance_id_for_cookie(c1),
+            "同账号必须稳定（否则每次重启都是新设备）"
+        );
         assert_ne!(a, instance_id_for_cookie(c2), "不同账号必须是不同实例 id");
         // UUID 形状：8-4-4-4-12，且第三段以 4 开头（版本位）
         let parts: Vec<&str> = a.split('-').collect();
@@ -1191,7 +1499,10 @@ mod tests {
             "UUID 各段长度不对: {a}"
         );
         assert!(parts[2].starts_with('4'), "版本位应为 4: {a}");
-        assert!(a.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-'), "只能含十六进制与连字符: {a}");
+        assert!(
+            a.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-'),
+            "只能含十六进制与连字符: {a}"
+        );
     }
 
     #[test]

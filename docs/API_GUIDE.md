@@ -5,7 +5,7 @@ Rust 版 OpenAI/Anthropic 兼容网关 + 多账号轮询 + 余额查询 + 桌面
 ## 快速开始
 
 ### 方式一：桌面安装包（推荐）
-1. 下载 `Freebuff2API Setup 0.3.0.exe`（Release 页）
+1. 下载最新版 `Freebuff2API Setup x64.exe`（Release 页，当前 v0.8.x）
 2. 安装后双击桌面快捷方式 → 自动拉起网关 + 打开控制台
 3. 托盘「一键登录新账号」→ 浏览器登录 freebuff.com → 自动抓 Cookie 入库
 
@@ -39,11 +39,18 @@ docker run -d -p 47821:47821 -v /data:/data freebuff2api
   "skills_dir": "data/skills",                // 技能目录（SKILL.md）
   "skills_inject_mode": "roster",             // roster（名称+描述）| full（全量）
   "max_roster_tokens": 2000,                  // roster 注入预算
-  "token_saver": false
+  "token_saver": false,
+  "redact_logs": true,                        // 日志/遥测脱敏（默认开）
+  "concurrency_free_slots": 1,                // 双桶信号量：免费层 {付费槽, 普通}
+  "concurrency_free_multi": 3,
+  "concurrency_sub_slots": 3,                 // 订阅层 {付费槽, 普通}
+  "concurrency_sub_multi": 8
 }
 ```
 
-环境变量优先：`AUTH_TOKENS` / `API_KEYS` / `HTTP_PROXY` / `LISTEN_ADDR` / `UPSTREAM_BASE_URL` / `AD_PROVIDERS` / `SQLITE_PATH` / `TELEMETRY_PATH` / `TOKENS_PATH` / `SKILLS_DIR` / `SKILLS_INJECT_MODE` / `MAX_ROSTER_TOKENS`。
+环境变量优先：`AUTH_TOKENS` / `API_KEYS` / `HTTP_PROXY` / `LISTEN_ADDR` / `UPSTREAM_BASE_URL` / `AD_PROVIDERS` / `SQLITE_PATH` / `TELEMETRY_PATH` / `TOKENS_PATH` / `SKILLS_DIR` / `SKILLS_INJECT_MODE` / `MAX_ROSTER_TOKENS` / `REDACT_LOGS` / `CONCURRENCY_FREE_SLOTS` / `CONCURRENCY_FREE_MULTI` / `CONCURRENCY_SUB_SLOTS` / `CONCURRENCY_SUB_MULTI`。
+
+> **双桶并发信号量**（v0.8 落地）：免费层同刻最多 1 个付费槽 + 3 个普通并发、订阅层 3 + 8（网关全局级，所有账号共享）。容量可调（`concurrency_*`），面板「设置」页可改；超过容量且 2 秒内未等到位返回 429（`concurrency_busy`），避免上游风控。保守判定：账号池任一凭证含 `unique_subscription` 等套餐特征走订阅桶，否则免费桶。
 
 ## API 端点
 
@@ -79,6 +86,8 @@ docker run -d -p 47821:47821 -v /data:/data freebuff2api
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/api/config/api-key` | POST | 运行时管理下游 API Key：`{"action":"generate"\|"set"\|"clear","key"?}`；**立即生效**并写回 `config.json`（非本机监听时禁止清空） |
+| `/api/config` | GET | 返回设置页可编辑配置项（脱敏；含信号量容量/脱敏开关/记忆等） |
+| `/api/config` | POST | 保存单个配置项 `{"key":"listen_addr","value":"..."}`：白名单校验 + 类型/合法值检查 + 原子写回 `config.json`；`memory_enabled` 立即热生效，其余重启生效 |
 
 ### 技能（Skills）
 | 端点 | 方法 | 说明 |

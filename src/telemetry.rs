@@ -158,10 +158,21 @@ impl Drop for TelemetryWriter {
 }
 
 /// 后台线程主循环：顺序消费消息，出错仅告警不中断
+/// 落库前对敏感字段脱敏（Cookie/Bearer/authorization → ***），见 `crate::redact`。
 fn writer_loop(conn: Connection, rx: Receiver<Msg>) {
     for msg in rx {
         match msg {
-            Msg::Row(row) => {
+            Msg::Row(mut row) => {
+                // v0.8 脱敏：错误摘要/路由原因/请求 key 都可能含凭证片段
+                if let Some(ex) = row.error_excerpt.take() {
+                    row.error_excerpt = Some(crate::redact::redact(&ex));
+                }
+                if let Some(rr) = row.route_reason.take() {
+                    row.route_reason = Some(crate::redact::redact(&rr));
+                }
+                if let Some(k) = row.api_key.take() {
+                    row.api_key = Some(crate::redact::redact(&k));
+                }
                 if let Err(e) = insert_row(&conn, &row) {
                     tracing::warn!(error = %e, "遥测明细写入失败");
                 }
@@ -171,6 +182,7 @@ fn writer_loop(conn: Connection, rx: Receiver<Msg>) {
                 kind,
                 detail,
             } => {
+                let detail = crate::redact::redact(&detail);
                 if let Err(e) = insert_event(&conn, &req_id, &kind, &detail) {
                     tracing::warn!(error = %e, "遥测事件写入失败");
                 }
