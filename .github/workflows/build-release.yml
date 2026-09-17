@@ -59,6 +59,22 @@ jobs:
           fi
           if [ "$TEST_RC" -ne 0 ] || [ "$CLIPPY_RC" -ne 0 ]; then exit 1; fi
 
+      - name: Format check
+        shell: bash
+        env:
+          CARGO_HTTP_PROXY: ""
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          ALL_PROXY: ""
+        run: |
+          set +e
+          cargo fmt --check 2>&1 | tee /tmp/fmt.log; FMT_RC=${PIPESTATUS[0]}
+          echo "fmt rc=$FMT_RC"
+          if [ "$FMT_RC" -ne 0 ]; then
+            echo "::error title=cargo-fmt-failed::$(tail -n 40 /tmp/fmt.log | tr '\n' '|' | cut -c1-6000)"
+          fi
+          exit $FMT_RC
+
       - name: Setup Node (Electron)
         uses: actions/setup-node@v4
         with:
@@ -96,3 +112,32 @@ jobs:
         with:
           files: desktop/dist/*.exe
           generate_release_notes: true
+
+  coverage:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: llvm-tools-preview
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cov-${{ hashFiles('Cargo.lock') }}
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Coverage gate (>=80% lines)
+        # 首次放行收集基线（本机未装 llvm-cov）；拿到基线后移除 continue-on-error 收紧
+        continue-on-error: true
+        env:
+          CARGO_HTTP_PROXY: ""
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          ALL_PROXY: ""
+        run: cargo llvm-cov --fail-under-lines 80

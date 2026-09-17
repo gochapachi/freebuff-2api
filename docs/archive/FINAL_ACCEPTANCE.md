@@ -1,3 +1,5 @@
+> 历史归档：v0.1.0 时代验收/交付报告，已过时（端口 8787、旧测试数），仅供追溯。当前版本见 README 与 workflow_status.md。
+
 # Freebuff2API 最终交付验收报告（第四轮·E2E 终验版）
 
 > 日期：2026-09-10 ｜ 仓库：https://github.com/lza6/Freebuff-2API ｜ Release：v0.1.0

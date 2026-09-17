@@ -100,8 +100,8 @@ docker run -d -p 47821:47821 -v /data:/data freebuff2api
 ## 测试与验证
 
 ```bash
-cargo test        # 236 单测 + 8 集成 + 10 路由级集成全绿
-cargo clippy -D warnings  # 零警告
+cargo test        # 253 单测 + 8 集成 + 11 路由级集成全绿（v0.9.0）
+cargo clippy --all-targets -- -D warnings  # 零警告
 ```
 
 真实 E2E 已实测：token 导入（curl/HAR/Cookie）✅、余额查询 ✅、账号详情 ✅、面板 ✅、上游冒烟 ✅。

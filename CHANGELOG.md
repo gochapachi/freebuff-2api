@@ -2,6 +2,45 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.0] - 2026-09-18
+
+### 新增
+
+- **web Cookie 凭证池化 + 多账号轮询**（`src/web_pool.rs`，修复 README 长期承认的"桥接路径只用第一个有效凭证"）：
+  - 复用 Bearer 池熔断语义（Closed/Open/HalfOpen、指数冷却封顶 10 分钟、HalfOpen 探测闸门）
+  - 全部 web Cookie 路径（chat/messages 桥接、余额、详情、上传、会话清理）改从池内按健康分/熔断/冷却挑选
+  - 401/403 确定性失效立即冷却，网络/5xx 连续失败累计熔断；成功 mark_ok 逐步恢复
+  - 导入/删除凭证后热刷新（`reload` 保留既有健康状态）；账号列表与健康看板展示 web 凭证
+- **上游模型元数据契约**（`src/models.rs` / `src/router.rs`，对照上游 freebuff-models.ts 当前快照）：
+  - 新增 `ModelMeta` 静态权威表：premium / multimodal / available / efforts 阶梯 / fallback
+  - 已暂停/下架模型标记不可用并给回落：gemini-3.8-flash、deepseek-v4-pro、minimax-m3、muse-spark-1.3、ox-alpha、glm-5.2
+  - GLM 5.3 阶梯对齐当前上游 `['low','high','max']`（max 原样保留）；solar/minimax/kimi/glm-5.2 无阶梯自动剥离
+  - `/v1/models` 响应带 `meta`（字段稳定，`data` 保持兼容）；`router::resolve_available/unavailable_reason` 供路由与面板消费
+- **面板（v0.9）**：
+  - 对话测试台升级：多轮会话上下文、system 提示词、reasoning_effort 下拉（按模型阶梯联动）、图片上传（拖拽/粘贴/选择 → /v1/uploads，失败自动降级 base64）、复制回复 / 导出 Markdown / 新会话
+  - 凭证健康看板：Bearer + web Cookie 合并展示（熔断徽章/评分/失败次数/冷却 + 每账号历史时间线）
+  - 总览"今日推荐"卡片：按 rateLimitsByModel 剩余排序（已暂停模型自动靠后）
+  - 设置页"数据迁移"：一键导出/导入（导入前二次确认 + 自动备份）
+  - 请求详情加耗时时间线（首字节 / 总耗时）
+- **鉴权纵深**：`inject_peer` 中间件把真实 TCP 对端（ConnectInfo）写入 `x-fb-peer`，`is_loopback_request` 改为"无代理头 && 对端回环"才算本机（127.0.0.1 默认行为不变）；`/api/doctor` 新增 `listen_scope` 检查（监听非回环且未配 api_keys → fault + 修复建议）
+- **全配置导出/导入**（`src/export.rs` + `/api/export` + `/api/import`）：schema 版本校验、大小上限 5MB、写前自动备份 `data/backup-<ts>/`、安全最小集（绝不覆盖 api_keys/auth_tokens）
+
+### 测试
+
+- 新增 `src/web_pool.rs` 7 项单测（多号优选/冷却跳过/半开恢复/连续失败熔断/脱敏快照/空池）
+- 新增 `src/models.rs` 4 项单测（元数据全量覆盖/单模型查询/暂停清单/meta_snapshot 字段）
+- 新增 `tests/model_meta_test.rs` 4 项（阶梯对齐/可用性回落/可读原因/未知模型默认可用）
+- 新增 `tests/web_pool_test.rs` 5 项；`tests/router_test.rs` 增至 11 项（含新端点）
+- 新增 `tests/e2e_phase_v0_9.cjs` **26 断言真实网关全绿**；`tests/e2e_phase_v0_8.cjs` 26 断言回归全绿
+- 真实浏览器（headless Chrome）渲染面板：JS 完整执行（model-count 占位符 → 20、模型 chips 渲染、全部 v0.9 控件在 DOM）
+- **规模：253 单测 + 8 core + 4 model_meta + 11 router + 5 web_pool 全绿**；`cargo clippy --all-targets -- -D warnings` 零警告；`cargo fmt --check` 通过
+
+### 修复
+
+- `tests/e2e_phase_v0_9.cjs` 契约对齐：健康端点返回合并 accounts（含 kind + 每条 history 时间线）
+- 文档：README 测试计数 236→253；旧 v0.1.0 验收报告移入 `docs/archive/`（顶部标注历史归档）
+- CI：`cargo fmt --check` + llvm-cov 覆盖率门禁（首次 continue-on-error 收集基线）
+
 ## [0.8.0] - 2026-09-15
 
 ### 新增

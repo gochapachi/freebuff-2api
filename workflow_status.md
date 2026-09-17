@@ -3,6 +3,33 @@
 > 单一状态源（长期任务恢复 / 节点协作 / 最终验收）。只记录事实与证据。
 > Phase G/H/I/J 已发布；当前跟踪 **Phase K（v0.8.0，核心链路加固 + 信号量落地 + 面板现代化 + 安全加固）**。
 
+## Phase L（v0.9.0，2026-09-18 完成）
+
+- **来源**：`计划书/下一步改进指南.md`（v0.8.0 → v0.9.x 可执行清单）
+- **范围**：web Cookie 凭证池化 + 多账号轮询 / 上游模型元数据契约与 efforts 对齐 / 面板测试台多模态多轮 / 账号健康看板 / 模型推荐 / 全配置导出导入 / 鉴权纵深 / 文档与 CI 门禁 / 发布 v0.9.0
+- **状态**：✅ DONE（全部条目落地，证据见下）
+
+### Phase L 交付清单（含证据）
+
+| ID | 目标 | 交付物 | 状态 | 证据 |
+|----|------|--------|------|------|
+| L1 | web Cookie 凭证池化 + 多账号轮询 | `src/web_pool.rs`（WebCookiePool：健康分/熔断/冷却/轮询）+ api.rs 全链路接入（chat/messages/余额/详情/上传/清理）+ 导入热刷新 | ✅ | 7 单测 + 5 集成全绿；`/api/accounts/health` 实测含 web-cookie 条目 |
+| L2 | 上游模型元数据契约 + efforts 对齐 | `ModelMeta` 静态权威表（premium/multimodal/available/efforts/fallback）+ clamp 阶梯对齐 + `/v1/models` meta | ✅ | models 4 单测 + model_meta_test 4 全绿；/v1/models 实测 19 条 meta、6 个不可用正确标记 |
+| L3 | 面板测试台多模态/多轮/effort | web.rs play tab：多轮上下文、system、effort 下拉、图片上传（拖拽/粘贴/选择）、复制/导出 | ✅ | check_panel_js 通过；headless Chrome DOM 渲染验证 |
+| L4 | 账号健康看板 + 模型推荐 + 数据迁移 + 耗时时间线 | /api/accounts/health + 面板健康/推荐/迁移/时间线 | ✅ | e2e_phase_v0_9 26 断言全绿 |
+| L5 | 鉴权纵深 | inject_peer（ConnectInfo→x-fb-peer）+ is_loopback_request 对端判定 + doctor listen_scope | ✅ | doctor 实测含 listen_scope；默认行为不变 |
+| L6 | 全配置导出/导入 | src/export.rs + /api/export + /api/import（schema 校验/备份/安全最小集） | ✅ | export 单测 4 + E2E round-trip 实测 |
+| L7 | 文档/CI/归档 | README 计数修正、旧报告归档 docs/archive、CI 加 fmt + llvm-cov 门禁、CHANGELOG 0.9.0、版本三同步 | ✅ | rg 236 无残留；YAML 解析通过 |
+
+### Phase L 验证基线（v0.9.0）
+
+- **单元/集成**：253 单测 + 8 core + 4 model_meta + 11 router + 5 web_pool **全绿**（`cargo test`）
+- **Lint**：`cargo clippy --all-targets -- -D warnings` 零警告；`cargo fmt --check` 通过
+- **真实 E2E**：`tests/e2e_phase_v0_9.cjs` 26 断言全绿（真实网关 47871）；`tests/e2e_phase_v0_8.cjs` 26 断言回归全绿
+- **真实浏览器**：headless Chrome 渲染面板 → JS 完整执行（model-count 占位符→20、模型 chips 渲染、全部 v0.9 控件在 DOM）
+- **新端点实测**：/api/accounts/health（bearer+web-cookie+history）、/api/export、/api/import（坏 schema 400、round-trip 200+备份）、/v1/models meta、doctor listen_scope
+- **环境限制（诚实披露）**：`cargo test --doc` 在本机失败（HEAD 基线同样失败：chocolatey Rust 缺少 rustdoc.exe），非本次改动引入
+
 ## Task Contract — Phase K（v0.8.0，2026-09-15 完成）
 
 - **来源**：`计划书/下一步改进指南.md`（v0.7.3 → v0.8+ 可执行清单）
