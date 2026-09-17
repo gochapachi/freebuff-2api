@@ -19,7 +19,7 @@ use crate::telemetry::{TelemetryWriter, TraceRow};
 use crate::upstream::UpstreamClient;
 use crate::usage::UsageDb;
 use axum::body::Body;
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
@@ -34,6 +34,8 @@ pub struct AppState {
     pub cfg: Arc<Config>,
     pub client: Arc<UpstreamClient>,
     pub pool: Arc<Pool>,
+    /// web Cookie 凭证池（v0.9 §1.1）：多账号健康评分/熔断/冷却/轮询
+    pub web_pool: Arc<crate::web_pool::WebCookiePool>,
     pub registry: Arc<ModelRegistry>,
     pub router: Arc<ModelRouter>,
     pub usage: Arc<UsageDb>,
@@ -117,9 +119,45 @@ fn origin_allowed(headers: &HeaderMap) -> bool {
     }
 }
 
-/// 判断请求是否来自本机：无任何代理头 = 直连本机（环回）；出现 X-Forwarded-For 等视为经代理/跨机
+/// 把真实 TCP 对端（axum `ConnectInfo<SocketAddr>` 扩展）写入 `x-fb-peer` 头，供 is_loopback_request 判定。
+///
+/// - 生产路径：`main` 用 `into_make_service_with_connect_info::<SocketAddr>()` 提供服务，每个请求
+///   都带 ConnectInfo 扩展 → 本中间件**无条件覆盖** `x-fb-peer` 为真实对端 IP，客户端无法伪造。
+/// - 单元测试/oneshot 路径：无 ConnectInfo 扩展 → 移除 `x-fb-peer`（避免客户端残留头干扰判定），
+///   测试可用 `req.extensions_mut().insert(ConnectInfo(peer))` 忠实模拟任意 peer。
+fn inject_peer(mut req: axum::extract::Request) -> axum::extract::Request {
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0);
+    match peer {
+        Some(addr) => {
+            let val = axum::http::HeaderValue::from_str(&addr.ip().to_string())
+                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("unknown"));
+            req.headers_mut().insert("x-fb-peer", val);
+        }
+        None => {
+            req.headers_mut().remove("x-fb-peer");
+        }
+    }
+    req
+}
+
+/// 判断请求是否来自本机（v0.9 §1.5 鉴权纵深）：
+/// 1. 出现 X-Forwarded-For / X-Real-IP（经代理或伪造代理头）→ 一律不算本机；
+/// 2. 再看真实 TCP 对端 `x-fb-peer`（由 inject_peer 从 ConnectInfo 写入）：非回环 → 拒绝；
+/// 3. 无 `x-fb-peer`（oneshot 单测未注入）→ 保持默认放行（127.0.0.1 默认行为不变）。
 fn is_loopback_request(headers: &HeaderMap) -> bool {
-    headers.get("x-forwarded-for").is_none() && headers.get("x-real-ip").is_none()
+    if headers.get("x-forwarded-for").is_some() || headers.get("x-real-ip").is_some() {
+        return false;
+    }
+    match headers.get("x-fb-peer").and_then(|v| v.to_str().ok()) {
+        None => true,
+        Some(ip) => ip
+            .parse::<std::net::IpAddr>()
+            .map(|a| a.is_loopback())
+            .unwrap_or(false),
+    }
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -149,7 +187,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/memory/toggle", post(handle_memory_toggle))
         .route("/api/threads/cleanup", post(handle_threads_cleanup))
         .route("/mcp", post(handle_mcp))
-        .route("/api/doctor", get(handle_doctor));
+        .route("/api/doctor", get(handle_doctor))
+        .route("/api/accounts/health", get(handle_accounts_health));
 
     Router::new()
         .route("/", get(handle_dashboard))
@@ -183,10 +222,17 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/prompts", get(handle_prompts_list))
         .route("/api/prompts/toggle", post(handle_prompts_toggle))
+        .route("/api/export", post(handle_export))
+        .route("/api/import", post(handle_import))
         .merge(api)
         .with_state(state)
         // v0.8 安全头：给全部响应加 nosniff / Referrer-Policy / CSP（本地自容面板无外部资源）
-        .layer(tower::ServiceBuilder::new().map_response(secure_headers))
+        // v0.9 鉴权纵深：请求进入前注入真实对端（ConnectInfo → x-fb-peer），供管理端点回环判定
+        .layer(
+            tower::ServiceBuilder::new()
+                .map_request(inject_peer)
+                .map_response(secure_headers),
+        )
 }
 
 /// 为每个响应附加安全头（幂等：不覆盖已有值，仅补充缺失的）
@@ -294,7 +340,24 @@ async fn handle_v1_models(State(st): State<AppState>, headers: HeaderMap) -> imp
             })
         })
         .collect();
-    Json(serde_json::json!({ "object": "list", "data": data })).into_response()
+    // v0.9 §1.2：模型元数据（availability/efforts/multimodal/fallback）并入响应。
+    // `data` 字段保持完全兼容，`meta` 为新增字段。
+    let meta = models_meta_snapshot(&st).await;
+    Json(serde_json::json!({ "object": "list", "data": data, "meta": meta })).into_response()
+}
+
+/// /v1/models 元数据接线点（v0.9 §1.2）。
+///
+/// 契约：`ModelRegistry::meta_snapshot() -> Vec<ModelMeta>`（字段 id/agent/premium/multimodal/
+/// available/efforts/fallback），由模型元数据 worker 在 `src/models.rs` 落地。
+/// **当前该接口尚未到位**（models.rs 为他人独占文件，本 worker 不越界），按任务约定降级为
+/// `meta: []` —— 响应结构稳定（`meta: [...]` 字段名即前端契约），集成阶段合拢时只需替换本函数体。
+async fn models_meta_snapshot(st: &AppState) -> Vec<serde_json::Value> {
+    st.registry
+        .meta_snapshot()
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
+        .collect()
 }
 
 // ---------- 用量 API ----------
@@ -329,6 +392,121 @@ async fn handle_usage_requests(State(st): State<AppState>, headers: HeaderMap) -
     }
 }
 
+// ---------- 全配置导出/导入（v0.9 §2.3） ----------
+
+/// POST /api/export — 全配置导出（脱敏 config + 凭证 + 技能启用态 + 记忆开关），换机迁移用
+async fn handle_export(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authorized(&headers, &st) {
+        return admin_denied();
+    }
+    // config 脱敏：只导白名单字段，api_keys / auth_tokens 明文绝不导出；http_proxy 仅保留 host 段
+    let mut config_masked = serde_json::Map::new();
+    for (key, _) in CONFIG_EDITABLE {
+        let v = match *key {
+            "listen_addr" => serde_json::json!(st.cfg.listen_addr),
+            "memory_enabled" => serde_json::json!(st.cfg.memory_enabled),
+            "token_saver" => serde_json::json!(st.cfg.token_saver),
+            "skills_inject_mode" => serde_json::json!(st.cfg.skills_inject_mode),
+            "max_roster_tokens" => serde_json::json!(st.cfg.max_roster_tokens),
+            "http_proxy" => serde_json::json!(redact_proxy_userinfo(&st.cfg.http_proxy)),
+            "thread_cleanup_interval_sec" => serde_json::json!(st.cfg.thread_cleanup_interval_sec),
+            "thread_max_age_hours" => serde_json::json!(st.cfg.thread_max_age_hours),
+            "redact_logs" => serde_json::json!(st.cfg.redact_logs),
+            "concurrency_free_slots" => serde_json::json!(st.cfg.concurrency_free_slots),
+            "concurrency_free_multi" => serde_json::json!(st.cfg.concurrency_free_multi),
+            "concurrency_sub_slots" => serde_json::json!(st.cfg.concurrency_sub_slots),
+            "concurrency_sub_multi" => serde_json::json!(st.cfg.concurrency_sub_multi),
+            _ => continue,
+        };
+        config_masked.insert((*key).to_string(), v);
+    }
+    let tokens = crate::import::load_tokens_healed(&st.cfg.tokens_path).unwrap_or_default();
+    let skills: Vec<crate::export::SkillState> = st
+        .skills
+        .list()
+        .iter()
+        .map(|s| crate::export::SkillState {
+            id: s.id.clone(),
+            enabled: s.enabled,
+        })
+        .collect();
+    let payload = crate::export::ExportPayload {
+        schema_version: crate::export::EXPORT_SCHEMA_VERSION.to_string(),
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        config: serde_json::json!(config_masked),
+        tokens,
+        skills,
+        memory_enabled: memory_enabled_now(&st),
+        note: "Freebuff2API 全配置导出（v0.9）".to_string(),
+    };
+    Json(serde_json::json!({ "ok": true, "data": payload })).into_response()
+}
+
+/// http_proxy 脱敏：`http://user:pass@host:port` → `http://***@host:port`
+fn redact_proxy_userinfo(proxy: &str) -> String {
+    if let Some(idx) = proxy.find("://") {
+        let rest = &proxy[idx + 3..];
+        if let Some(at) = rest.rfind('@') {
+            return format!("{}://***@{}", &proxy[..idx], &rest[at + 1..]);
+        }
+    }
+    proxy.to_string()
+}
+
+/// POST /api/import — body `{data: ExportPayload}`：校验 → 自动备份 → 原子写回
+async fn handle_import(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Some(resp) = write_guard(&headers, &st) {
+        return resp;
+    }
+    if body.len() > crate::export::MAX_IMPORT_BYTES {
+        return bad_req(&format!(
+            "导入数据超过上限 {}MB",
+            crate::export::MAX_IMPORT_BYTES / 1024 / 1024
+        ));
+    }
+    let v: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return bad_req("body 必须是 JSON（{ \"data\": <导出内容> }）"),
+    };
+    let payload = match crate::export::validate_import_body(&v) {
+        Ok(p) => p,
+        Err(e) => return bad_req(&format!("导入校验失败：{e}")),
+    };
+    // 备份目录 = tokens_path 所在目录（默认 data/），与 import.rs 落盘位置一致
+    let data_dir = std::path::Path::new(&st.cfg.tokens_path)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "data".to_string());
+    let ctx = crate::export::ImportContext {
+        config_path: crate::config::resolve_config_path(),
+        tokens_path: &st.cfg.tokens_path,
+        data_dir: &data_dir,
+        skills: &st.skills,
+        skills_dir: &st.cfg.skills_dir,
+        memory_runtime_enabled: &st.memory_runtime_enabled,
+    };
+    match crate::export::apply_import(&payload, &ctx) {
+        Ok(summary) => {
+            let backup = summary.backed_up_to.as_deref().unwrap_or("-").to_string();
+            st.logs.emit(
+                "warn",
+                "config",
+                None,
+                format!("已导入配置备份（{}）", backup),
+            );
+            // v0.9 §1.1：导入可能带新 web Cookie 凭证 → 热刷新池（保留既有健康状态）
+            st.web_pool.reload(&st.cfg).await;
+            Json(serde_json::json!({ "ok": true, "imported": summary })).into_response()
+        }
+        Err(e) => internal_err(&anyhow::Error::msg(format!(
+            "导入失败（已备份可回滚）：{e}"
+        ))),
+    }
+}
 // ---------- 账号余额查询（web 版协议） ----------
 
 /// GET /api/account/balance — 查询账号积分/每模型限额/套餐（用 web Cookie）
@@ -336,21 +514,9 @@ async fn handle_account_balance(State(st): State<AppState>, headers: HeaderMap) 
     if !admin_authorized(&headers, &st) {
         return admin_denied();
     }
-    // 候选：先找看起来像 Cookie 的 token（含 session-token），config 优先，其次导入库
-    // 收窄判定（v0.8）：不再用 "%3A" 兜底——那会把任意 URL 编码串误判为 Cookie；
-    // 只认 next-auth 三件套特征。
-    let looks_like_cookie = |t: &str| {
-        t.contains("session-token") || t.contains(".next-auth") || t.contains("callback-url")
-    };
-    let cookie_candidate = st
-        .cfg
-        .auth_tokens
-        .iter()
-        .find(|t| looks_like_cookie(t))
-        .cloned()
-        .or_else(|| load_imported_token(&st.cfg.tokens_path).filter(|t| looks_like_cookie(t)));
-    let cookie = match cookie_candidate {
-        Some(c) => c,
+    // v0.9 §1.1：从 WebCookiePool 挑选（健康分/熔断/冷却/轮询）；无 Cookie 保持原报错文案
+    let (cookie, cid) = match pick_web_cookie(&st).await {
+        Some((c, _, id)) => (c, id),
         None => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -366,6 +532,7 @@ async fn handle_account_balance(State(st): State<AppState>, headers: HeaderMap) 
     };
     match client.freebuff_session().await {
         Ok(sess) => {
+            st.web_pool.mark_ok(&cid).await;
             // 计算每模型剩余可用次数
             let mut model_remaining = serde_json::Map::new();
             if let Some(freebucks) = &sess.freebucks {
@@ -419,17 +586,13 @@ async fn handle_account_balance(State(st): State<AppState>, headers: HeaderMap) 
             }))
             .into_response()
         }
-        Err(e) => internal_err(&e),
+        Err(e) => {
+            web_pool_failure(&st, &cid, &e.to_string()).await;
+            internal_err(&e)
+        }
     }
 }
 
-/// 读取导入凭证文件中第一个 token（路径可配置）
-fn load_imported_token(path: &str) -> Option<String> {
-    crate::import::load_tokens(path)
-        .ok()
-        .and_then(|t| t.into_iter().next())
-        .map(|t| t.token)
-}
 /// 统一 500 JSON 错误响应
 /// GET /api/prompts — 列出内置提示词与技能（含启用状态）
 async fn handle_prompts_list(State(st): State<AppState>, headers: HeaderMap) -> Response {
@@ -538,16 +701,19 @@ async fn handle_web_chat(
     if keys.is_empty() && !is_loopback_request(&headers) {
         return admin_denied();
     }
-    let cookie = load_imported_token(&st.cfg.tokens_path).filter(|t| t.contains("session-token"));
-    let cookie = match cookie {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": { "message": "未导入 web Cookie 凭证。请 POST /api/tokens/import 粘贴 Cookie", "type": "invalid_request_error" } })),
-            )
-                .into_response();
-        }
+    // v0.9 §1.1：从 WebCookiePool 挑选（多账号健康/冷却/轮询）
+    let (cookie, web_cid) = match pick_web_cookie(&st).await {
+        Some((c, _, cid)) => (c, Some(cid)),
+        None => (String::new(), None),
+    };
+    let cookie = if cookie.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": { "message": "未导入 web Cookie 凭证。请 POST /api/tokens/import 粘贴 Cookie", "type": "invalid_request_error" } })),
+        )
+            .into_response();
+    } else {
+        cookie
     };
     let parsed: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -676,6 +842,10 @@ async fn handle_web_chat(
         .await
     {
         Ok(body) => {
+            // v0.9：HTTP 层成功即记 ok
+            if let Some(id) = &web_cid {
+                st.web_pool.mark_ok(id).await;
+            }
             // 遥测：旁路扫描流（首字节/字节数/usage）+ 完成后上报（web 协议用 Cookie，标记 web-cookie）
             let req_id = uuid::Uuid::new_v4().to_string();
             let (tx, rx) =
@@ -773,7 +943,13 @@ async fn handle_web_chat(
                 .body(Body::from_stream(body_stream))
                 .unwrap()
         }
-        Err(e) => internal_err(&e),
+        Err(e) => {
+            // v0.9：401/403/网络失败 → 池内降分/熔断/冷却，下个请求自动换号
+            if let Some(id) = &web_cid {
+                web_pool_failure(&st, id, &e.to_string()).await;
+            }
+            internal_err(&e)
+        }
     }
 }
 
@@ -936,8 +1112,14 @@ async fn web_bridge_openai(
         .chat_stream_raw(thread_id.as_deref(), &content, None, Vec::new(), Vec::new())
         .await;
     let body = match upstream {
-        Ok(b) => b,
+        Ok(b) => {
+            // v0.9：HTTP 层成功（200）即记 ok；中途断流由后续重试经冷却/降分兜底
+            st.web_pool.mark_ok(&cid).await;
+            b
+        }
         Err(e) => {
+            // v0.9：401/403/网络失败 → 池内降分/熔断/冷却，下个请求自动换号
+            web_pool_failure(&st, &cid, &e.to_string()).await;
             // 绑定的 thread 可能已被上游清理 → 清绑定，客户端重试即自动新开会话
             if matches!(mode, BridgeMode::Continue { .. }) {
                 let _ = st.web_threads.clear(&cid);
@@ -1461,7 +1643,108 @@ async fn handle_accounts(State(st): State<AppState>, headers: HeaderMap) -> Resp
     if !admin_authorized(&headers, &st) {
         return admin_denied();
     }
-    Json(st.pool.snapshot().await).into_response()
+    // v0.9：Bearer 池快照保持原字段兼容；web Cookie 凭证并入展示（含健康字段，契约见 WebAccountSnapshot）
+    let pool_snap = st.pool.snapshot().await;
+    let web_snap = st.web_pool.snapshot().await;
+    let mut json = serde_json::to_value(&pool_snap)
+        .unwrap_or_else(|_| serde_json::json!({ "accounts": [], "total": 0 }));
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "web_accounts".to_string(),
+            serde_json::to_value(&web_snap).unwrap_or_else(|_| serde_json::json!([])),
+        );
+        obj.insert("web_total".to_string(), serde_json::json!(web_snap.len()));
+    }
+    Json(json).into_response()
+}
+
+/// GET /api/accounts/health — 账号健康看板（Bearer + web Cookie 合并，含历史时间线）。
+///
+/// 字段名即前端契约（v0.9 任务 B §4，勿改名）：
+/// `{ok, accounts:[{id, kind:"bearer"|"web-cookie", masked, health_score, circuit_state,
+///   cooldown_until, trips, last_error, last_ok_at, history:[{ts,type,detail}]}]}`
+async fn handle_accounts_health(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authorized(&headers, &st) {
+        return admin_denied();
+    }
+    let mut accounts: Vec<serde_json::Value> = Vec::new();
+
+    // Bearer：从池内读实时熔断/评分（cooldown 换算 RFC3339 与 web 一致）
+    {
+        let pool_accounts = st.pool.accounts.lock().await;
+        for acc in pool_accounts.iter() {
+            let score = *acc.score.read().await;
+            let breaker = acc.breaker.read().await;
+            let sess = acc.session.snapshot().await;
+            let id = crate::import::cred_id(&acc.token);
+            let cooldown_until = breaker.open_until.and_then(|u| {
+                let remaining = u.checked_duration_since(std::time::Instant::now())?;
+                let wall =
+                    chrono::Utc::now() + chrono::Duration::from_std(remaining).unwrap_or_default();
+                Some(wall.to_rfc3339())
+            });
+            accounts.push(serde_json::json!({
+                "id": id,
+                "kind": "bearer",
+                "masked": mask(&acc.token),
+                "health_score": score,
+                "circuit_state": match breaker.state {
+                    crate::pool::CircuitState::Closed => "closed",
+                    crate::pool::CircuitState::Open => "open",
+                    crate::pool::CircuitState::HalfOpen => "half_open",
+                },
+                "cooldown_until": cooldown_until,
+                "trips": breaker.trips,
+                "last_error": sess.last_error,
+                "last_ok_at": null,
+                "history": account_history_timeline(&st, &id, 20),
+            }));
+        }
+    }
+
+    // web Cookie：直接来自 WebCookiePool.snapshot()
+    for w in st.web_pool.snapshot().await {
+        accounts.push(serde_json::json!({
+            "id": w.id,
+            "kind": w.kind,
+            "masked": w.masked,
+            "health_score": w.health_score,
+            "circuit_state": w.circuit_state,
+            "cooldown_until": w.cooldown_until,
+            "trips": w.trips,
+            "last_error": w.last_error,
+            "last_ok_at": w.last_ok_at,
+            "history": account_history_timeline(&st, &w.id, 20),
+        }));
+    }
+    Json(serde_json::json!({ "ok": true, "accounts": accounts })).into_response()
+}
+
+/// 账号历史时间线：读 account_history.jsonl（AccountMetaStore.history，最新在前），
+/// 映射为前端时间线事件 `{ts, type, detail}`（type: "ok" | "error"）。
+fn account_history_timeline(st: &AppState, cred_id: &str, limit: usize) -> Vec<serde_json::Value> {
+    st.meta
+        .history(Some(cred_id), limit)
+        .ok()
+        .unwrap_or_default()
+        .iter()
+        .map(|r| {
+            let ty = if r.ok { "ok" } else { "error" };
+            let detail = if r.ok {
+                let mut parts = vec!["检查通过".to_string()];
+                if let Some(t) = &r.tier_id {
+                    parts.push(format!("tier={t}"));
+                }
+                if let Some(rem) = r.daily_remaining {
+                    parts.push(format!("今日剩余 {rem}"));
+                }
+                parts.join(" · ")
+            } else {
+                "检查失败（凭证不可用或上游拒绝）".to_string()
+            };
+            serde_json::json!({ "ts": r.ts, "type": ty, "detail": detail })
+        })
+        .collect()
 }
 
 // ---------- Token 导入（curl / HAR 自动解析入库） ----------
@@ -1534,9 +1817,15 @@ async fn handle_token_import(
                     breaker: tokio::sync::RwLock::new(crate::pool::CircuitBreaker::new()),
                 })
                 .collect();
-            // 非 Bearer 凭证（web-cookie）不入池，但仍计入"导入成功"响应
+            // 非 Bearer 凭证（web-cookie）不入 Bearer 池，但仍计入"导入成功"响应
             for acc in new_accounts {
                 st.pool.add_account(acc).await;
+            }
+            // v0.9：web Cookie 凭证进入 WebCookiePool（健康/熔断/冷却/轮询）
+            for t in added.iter().filter(|t| t.token.contains("session-token")) {
+                st.web_pool
+                    .add_if_absent(&t.token, &t.source, t.added_at.clone())
+                    .await;
             }
             Json(serde_json::json!({
                 "ok": true,
@@ -1646,6 +1935,14 @@ async fn handle_token_check(
         tracing::warn!("写入账号信息缓存失败: {e}");
     }
     record_history(&st, &meta, ok);
+    // v0.9：web Cookie 凭证同步池健康（401/403/不可用 → 熔断冷却，自动换号）
+    if crate::import::kind_of(&tok.token) == "web-cookie" {
+        if ok {
+            st.web_pool.mark_ok(&id).await;
+        } else {
+            web_pool_failure(&st, &id, meta.error.as_deref().unwrap_or("凭证检查失败")).await;
+        }
+    }
     st.logs.emit(
         if ok { "info" } else { "warn" },
         "account",
@@ -1685,6 +1982,10 @@ async fn handle_token_delete(
     match crate::import::delete_token(&st.cfg.tokens_path, &id) {
         Ok(Some(removed)) => {
             let in_pool = st.pool.remove_account(&removed.token).await;
+            // v0.9：web Cookie 凭证同时从 WebCookiePool 移除
+            if crate::import::kind_of(&removed.token) == "web-cookie" {
+                let _ = st.web_pool.remove(&id).await;
+            }
             let _ = st.meta.remove(&id);
             st.logs.emit(
                 "warn",
@@ -1754,7 +2055,7 @@ async fn handle_guide(State(st): State<AppState>, headers: HeaderMap) -> Respons
     let keys = api_keys_of(&st);
     let masked: Vec<String> = keys.iter().map(|k| mask(k)).collect();
     let models = st.registry.models().await;
-    let web_cookie = pick_web_cookie(&st).map(|(_, cred, _)| cred);
+    let web_cookie = pick_web_cookie(&st).await.map(|(_, cred, _)| cred);
     Json(serde_json::json!({
         "ok": true,
         "listen_addr": st.cfg.listen_addr,
@@ -2237,16 +2538,11 @@ async fn handle_account_detail(
             }
         }
     }
-    let cookie = cookie.or_else(|| {
-        st.cfg
-            .auth_tokens
-            .iter()
-            .find(|t| t.contains("session-token"))
-            .cloned()
-            .or_else(|| {
-                load_imported_token(&st.cfg.tokens_path).filter(|t| t.contains("session-token"))
-            })
-    });
+    // body 未指定 cookie 时（v0.9）：从 WebCookiePool 挑选；无 Cookie 保持原报错文案
+    let cookie = match cookie {
+        Some(c) => Some(c),
+        None => pick_web_cookie(&st).await.map(|(c, _, _)| c),
+    };
     let cookie = match cookie {
         Some(c) => c,
         None => {
@@ -2257,6 +2553,8 @@ async fn handle_account_detail(
                 .into_response();
         }
     };
+    // 池健康反馈：freebuff_session 成功 → 记 ok；失败 → 记 failure（401/403 自动冷却）
+    let cid = crate::import::cred_id(&cookie);
     let client = match crate::web_protocol::WebClient::new(cookie.clone(), "glm-5.3-flash".into()) {
         Ok(c) => c,
         Err(e) => return internal_err(&anyhow::Error::msg(e.to_string())),
@@ -2266,6 +2564,10 @@ async fn handle_account_detail(
     let usage = client.usage_summary().await;
     let auth = client.auth_session().await;
     let subs = client.subscriptions().await;
+    match &balance {
+        Ok(_) => st.web_pool.mark_ok(&cid).await,
+        Err(e) => web_pool_failure(&st, &cid, &e.to_string()).await,
+    }
     Json(serde_json::json!({
         "ok": true,
         "cookie_masked": mask(&cookie),
@@ -2369,7 +2671,7 @@ async fn handle_chat_completions(
         .iter()
         .any(|tok| tok.len() >= 20 && !tok.starts_with("__TEST_SKIP__"));
     if !pool_has_usable {
-        if let Some((cookie, cred, cid)) = pick_web_cookie(&st) {
+        if let Some((cookie, cred, cid)) = pick_web_cookie(&st).await {
             if cookie.contains("session-token") {
                 return web_bridge_openai(st, parsed, requested, model, cookie, cred, cid).await;
             }
@@ -3138,7 +3440,7 @@ async fn handle_claude_messages(
         .iter()
         .any(|tok| tok.len() >= 20 && !tok.starts_with("__TEST_SKIP__"));
     if !pool_has_usable {
-        if let Some((cookie, cred, cid)) = pick_web_cookie(&st) {
+        if let Some((cookie, cred, cid)) = pick_web_cookie(&st).await {
             if cookie.contains("session-token") {
                 // Claude messages → OpenAI messages 复用现有转换（含 system/blocks/tool_use）
                 let openai_msgs = claude_to_openai_messages(
@@ -4436,7 +4738,7 @@ async fn sweep_threads(
     if dry_run || expired_ids.is_empty() {
         return Ok(outcome);
     }
-    let (cookie, _, _) = match pick_web_cookie(st) {
+    let (cookie, _, cid) = match pick_web_cookie(st).await {
         Some(v) => v,
         None => anyhow::bail!("需要 web Cookie 凭证才能清理上游会话"),
     };
@@ -4447,6 +4749,8 @@ async fn sweep_threads(
         match client.delete_thread(id).await {
             // 上游已删掉 / 本来就不存在（404）→ 两种情况都不需要再保留本地记录
             Ok(found) => {
+                // v0.9：删除成功 → 池记 ok
+                st.web_pool.mark_ok(&cid).await;
                 outcome.deleted += 1;
                 outcome.deleted_ids.push(id.clone());
                 st.logs.emit(
@@ -4461,6 +4765,8 @@ async fn sweep_threads(
                 );
             }
             Err(e) => {
+                // v0.9：删除失败（401/403/网络）→ 池内降分/熔断/冷却
+                web_pool_failure(st, &cid, &e.to_string()).await;
                 outcome.failed.push(id.clone());
                 tracing::debug!("删除会话 {id} 失败: {e}");
                 if let Some(orig) = all
@@ -4862,6 +5168,22 @@ async fn handle_doctor(State(st): State<AppState>, headers: HeaderMap) -> Respon
         "id": "config", "label": "配置", "state": "ok",
         "detail": format!("监听 {}，上游 {}", st.cfg.listen_addr, st.cfg.upstream_base_url),
     }));
+    // 1b. 监听非回环且未配置 api_keys → 警告（v0.9 §1.5 鉴权纵深）
+    let non_loopback = !st.cfg.listen_addr.starts_with("127.")
+        && !st.cfg.listen_addr.starts_with("localhost")
+        && !st.cfg.listen_addr.starts_with("[::1]");
+    if non_loopback && api_keys_of(&st).is_empty() {
+        checks.push(serde_json::json!({
+            "id": "listen_scope", "label": "监听范围", "state": "fault",
+            "detail": format!("监听 {}（非回环）但未配置 api_keys —— 局域网/远端可访问面板与管理接口", st.cfg.listen_addr),
+            "fix": "设置 api_keys（面板「接入指南」一键生成），或将 listen_addr 改回 127.0.0.1",
+        }));
+    } else {
+        checks.push(serde_json::json!({
+            "id": "listen_scope", "label": "监听范围", "state": "ok",
+            "detail": format!("监听 {}", st.cfg.listen_addr),
+        }));
+    }
     // 2. 账号池
     let snap = st.pool.snapshot().await;
     let healthy = snap.accounts.iter().filter(|a| a.healthy).count();
@@ -4915,7 +5237,20 @@ async fn handle_doctor(State(st): State<AppState>, headers: HeaderMap) -> Respon
             mem_stats.get("corrections").and_then(|v| v.as_i64()).unwrap_or(0)
         ),
     }));
-    // 8. 版本
+    // 8. 监听地址 + api_keys（v0.9 §1.5 鉴权纵深警告）
+    if !crate::config::is_loopback_listen(&st.cfg.listen_addr) && api_keys_of(&st).is_empty() {
+        checks.push(serde_json::json!({
+            "id": "listen", "label": "监听地址", "state": "warn",
+            "detail": format!("监听非回环 {} 但未配置 api_keys：局域网内其他设备可访问面板/管理端点（已按真实 TCP 对端收窄，仅本机回环放行）", st.cfg.listen_addr),
+            "fix": "在 config.json 配置 api_keys，或把 listen_addr 改回 127.0.0.1",
+        }));
+    } else {
+        checks.push(serde_json::json!({
+            "id": "listen", "label": "监听地址", "state": "ok",
+            "detail": format!("监听 {}", st.cfg.listen_addr),
+        }));
+    }
+    // 9. 版本
     checks.push(serde_json::json!({
         "id": "version", "label": "版本", "state": "fact",
         "detail": format!("v{}（运行 {} 秒）", env!("CARGO_PKG_VERSION"), st.started.elapsed().as_secs()),
@@ -5060,16 +5395,19 @@ async fn handle_upload(
         )
             .into_response();
     }
-    let cookie = load_imported_token(&st.cfg.tokens_path).filter(|t| t.contains("session-token"));
-    let cookie = match cookie {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": { "message": "多模态上传需要 web Cookie 凭证（先 POST /api/tokens/import 导入）", "type": "invalid_request_error", "code": "multimodal_requires_web_cookie" } })),
-            )
-                .into_response();
-        }
+    // v0.9 §1.1：从 WebCookiePool 挑选（多账号健康/冷却/轮询）
+    let (cookie, web_cid) = match pick_web_cookie(&st).await {
+        Some((c, _, cid)) => (c, Some(cid)),
+        None => (String::new(), None),
+    };
+    let cookie = if cookie.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": { "message": "多模态上传需要 web Cookie 凭证（先 POST /api/tokens/import 导入）", "type": "invalid_request_error", "code": "multimodal_requires_web_cookie" } })),
+        )
+            .into_response();
+    } else {
+        cookie
     };
     if body.is_empty() {
         return bad_req("empty body（请用 --data-binary 发送文件内容）");
@@ -5124,6 +5462,9 @@ async fn handle_upload(
         .await
     {
         Ok(up) => {
+            if let Some(id) = &web_cid {
+                st.web_pool.mark_ok(id).await;
+            }
             st.logs.emit(
                 "info",
                 "upload",
@@ -5156,6 +5497,9 @@ async fn handle_upload(
             .into_response()
         }
         Err(e) => {
+            if let Some(id) = &web_cid {
+                web_pool_failure(&st, id, &e.to_string()).await;
+            }
             // 截断上游错误体（防泄露账号/内部细节）
             let msg: String = e.to_string().chars().take(300).collect();
             (
@@ -5176,24 +5520,23 @@ fn bad_req(msg: &str) -> Response {
         .into_response()
 }
 
-/// 选取 web Cookie 凭证（config 优先，其次导入库；返回 cookie + 展示信息 + 稳定 id）
-fn pick_web_cookie(st: &AppState) -> Option<(String, serde_json::Value, String)> {
-    let looks_like = |t: &str| t.contains("session-token");
-    if let Some(c) = st.cfg.auth_tokens.iter().find(|t| looks_like(t)) {
-        return Some((
-            c.clone(),
-            serde_json::json!({ "source": "config", "added_at": null, "token_masked": mask(c) }),
-            crate::import::cred_id(c),
-        ));
+/// 选取 web Cookie 凭证（v0.9 §1.1：从 WebCookiePool 按健康分/熔断/冷却挑选；
+/// config 与导入库凭证已在池构建时并入）。返回 cookie + 展示信息 + 稳定 id。
+async fn pick_web_cookie(st: &AppState) -> Option<(String, serde_json::Value, String)> {
+    let p = st.web_pool.pick().await?;
+    Some((p.cookie, p.cred, p.id))
+}
+
+/// v0.9：web 池失败回写——401/403 确定性失效立即冷却（10 分钟，与 Bearer 池语义对齐），
+/// 其余（网络/5xx）走连续失败累计 → 达阈值熔断。
+async fn web_pool_failure(st: &AppState, id: &str, err: &str) {
+    if err.contains("401") || err.contains("403") {
+        st.web_pool
+            .mark_cooldown(id, std::time::Duration::from_secs(600), err)
+            .await;
+    } else {
+        st.web_pool.mark_failure(id, err).await;
     }
-    let toks = crate::import::load_tokens_healed(&st.cfg.tokens_path).ok()?;
-    let t = toks.into_iter().find(|t| looks_like(&t.token))?;
-    let id = crate::import::cred_id(&t.token);
-    Some((
-        t.token.clone(),
-        serde_json::json!({ "source": t.source, "added_at": t.added_at, "token_masked": mask(&t.token), "id": id }),
-        id,
-    ))
 }
 
 /// 按稳定 id 取出一条 web Cookie 凭证（用于"对指定凭证做检查/详情"）
@@ -5350,7 +5693,7 @@ async fn handle_account_overview(State(st): State<AppState>, headers: HeaderMap)
     if !admin_authorized(&headers, &st) {
         return admin_denied();
     }
-    let (cookie, cred, cid) = match pick_web_cookie(&st) {
+    let (cookie, cred, cid) = match pick_web_cookie(&st).await {
         Some(v) => v,
         None => {
             return (
@@ -5386,6 +5729,8 @@ async fn handle_account_overview(State(st): State<AppState>, headers: HeaderMap)
             .map(|e| e.to_string())
             .or_else(|| quota.as_ref().err().map(|e| e.to_string()))
             .unwrap_or_else(|| "上游未返回登录账号（凭证已失效或未登录）".into());
+        // v0.9：凭证不可用 → 池内降分/熔断/冷却（401/403 自动熔断，其它累计）
+        web_pool_failure(&st, &cid, &hint).await;
         // 失败也记一条，便于排查"这个账号什么时候开始不可用"
         let mut failed = crate::account_meta::CredMeta {
             cred_id: cid,
@@ -5424,6 +5769,8 @@ async fn handle_account_overview(State(st): State<AppState>, headers: HeaderMap)
         tracing::warn!("写入账号信息缓存失败: {e}");
     }
     record_history(&st, &meta, true);
+    // v0.9：拉取成功 → 记 ok（HalfOpen 探测连续成功可恢复 Closed）
+    st.web_pool.mark_ok(&cid).await;
     st.logs.emit("info", "account", None, "账号全貌已刷新");
     Json(serde_json::json!({
         "ok": true,
@@ -5443,7 +5790,7 @@ async fn handle_account_refresh(State(st): State<AppState>, headers: HeaderMap) 
     if let Some(resp) = write_guard(&headers, &st) {
         return resp;
     }
-    let (cookie, cred, cid) = match pick_web_cookie(&st) {
+    let (cookie, cred, cid) = match pick_web_cookie(&st).await {
         Some(v) => v,
         None => {
             return (
@@ -5464,6 +5811,12 @@ async fn handle_account_refresh(State(st): State<AppState>, headers: HeaderMap) 
                 .and_then(|t| t.as_str())
                 .map(|s| !s.is_empty())
                 .unwrap_or(false);
+            // v0.9：保活成功且拿到短期 token → 记 ok；可达但无 token → 记 failure（可能过期）
+            if has_token {
+                st.web_pool.mark_ok(&cid).await;
+            } else {
+                web_pool_failure(&st, &cid, "端点可达但未返回短期 token").await;
+            }
             st.logs.emit(
                 "info",
                 "account",
@@ -5480,6 +5833,8 @@ async fn handle_account_refresh(State(st): State<AppState>, headers: HeaderMap) 
             .into_response()
         }
         Err(e) => {
+            // v0.9：保活失败（401/403/网络）→ 池内降分/熔断/冷却
+            web_pool_failure(&st, &cid, &e.to_string()).await;
             st.logs
                 .emit("warn", "account", None, format!("凭证保活检查失败: {e}"));
             // 失效也要落一条，凭证列表能直接看到"这条已失效"
@@ -5671,6 +6026,16 @@ mod tests {
         let mut h2 = HeaderMap::new();
         h2.insert("x-real-ip", "1.2.3.4".parse().unwrap());
         assert!(!is_loopback_request(&h2));
+        // v0.9 鉴权纵深：真实对端（x-fb-peer，由 inject_peer 从 ConnectInfo 写入）
+        let mut h3 = HeaderMap::new();
+        h3.insert("x-fb-peer", "192.168.1.5".parse().unwrap());
+        assert!(!is_loopback_request(&h3), "非回环 peer 不得视为本机");
+        let mut h4 = HeaderMap::new();
+        h4.insert("x-fb-peer", "127.0.0.1".parse().unwrap());
+        assert!(is_loopback_request(&h4), "回环 peer 应放行");
+        let mut h5 = HeaderMap::new();
+        h5.insert("x-fb-peer", "not-an-ip".parse().unwrap());
+        assert!(!is_loopback_request(&h5), "无法解析的 peer 一律拒绝");
     }
 
     #[test]

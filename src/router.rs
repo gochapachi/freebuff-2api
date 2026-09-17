@@ -87,8 +87,16 @@ impl ModelRouter {
         SUPPORTED.iter().any(|p| model.starts_with(p))
     }
 
-    /// 模型支持的 efforts 范围（逆向自上游常量）；None = 不支持
+    /// 模型支持的 efforts 范围；None = 不支持
+    ///
+    /// v0.9：以元数据权威表（`ModelRegistry` 静态表，对齐上游 freebuff-models.ts）优先；
+    /// 表内模型 efforts=None 即不支持（不再按前缀推测）；表外模型（上游动态新增）按前缀回退，
+    /// 避免 deepseek/glm 变体丢档位。
     pub fn reasoning_efforts(&self, model: &str) -> Option<Vec<&'static str>> {
+        if self.registry.meta_for(model).is_some() {
+            return self.registry.efforts_static(model).map(|e| e.to_vec());
+        }
+        // 表外模型：前缀回退（兼容上游动态新增）
         if model.starts_with("deepseek/")
             || model.starts_with("z-ai/glm")
             || model.starts_with("stealth/ox-alpha")
@@ -104,6 +112,33 @@ impl ModelRouter {
         } else {
             None
         }
+    }
+
+    /// 模型是否可免费使用（元数据；未知模型默认可用，不误伤上游动态新增）
+    pub fn model_available(&self, model: &str) -> bool {
+        self.registry.model_available(model)
+    }
+
+    /// 模型不可用且有回落时返回回落模型；可用 / 未知模型 → None
+    pub fn resolve_available(&self, model: &str) -> Option<String> {
+        let meta = self.registry.meta_for(model)?;
+        if meta.available {
+            return None;
+        }
+        meta.fallback
+    }
+
+    /// 不可用模型的可读原因（面板展示用）；可用 / 未知模型 → None
+    pub fn unavailable_reason(&self, model: &str) -> Option<String> {
+        let meta = self.registry.meta_for(model)?;
+        if meta.available {
+            return None;
+        }
+        let mut msg = format!("模型 {model} 已被上游暂停/下架（免费模式不再提供）");
+        if let Some(fb) = &meta.fallback {
+            msg.push_str(&format!("；建议改用 {fb}"));
+        }
+        Some(msg)
     }
 
     /// 校正 effort：不支持或超范围时降级到最近支持值

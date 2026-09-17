@@ -17,6 +17,7 @@ pub mod ads;
 pub mod api;
 pub mod config;
 pub mod errors;
+pub mod export;
 pub mod extension;
 pub mod import;
 pub mod logbus;
@@ -40,6 +41,7 @@ pub mod telemetry;
 pub mod upstream;
 pub mod usage;
 pub mod web;
+pub mod web_pool;
 pub mod web_protocol;
 pub mod web_threads;
 

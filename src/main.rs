@@ -159,10 +159,14 @@ async fn main() -> anyhow::Result<()> {
         cfg.concurrency_sub_multi,
     );
 
+    // v0.9 §1.1：web Cookie 凭证池（config Cookie 项 + 导入库 kind=web-cookie）
+    let web_pool = Arc::new(freebuff2api::web_pool::WebCookiePool::new(&cfg));
+
     let state = AppState {
         cfg: Arc::new(cfg),
         client,
         pool,
+        web_pool,
         registry,
         router,
         usage,
@@ -224,7 +228,12 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     tracing::info!("HTTP 服务就绪");
-    axum::serve(listener, app).await?;
+    // v0.9 §1.5：注入真实 TCP 对端（ConnectInfo<SocketAddr>）供管理端点回环判定
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
