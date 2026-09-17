@@ -86,6 +86,12 @@
 - 密码学随机 Key 轮换宽限期、桌面版多账号轮询增强（P3 记录）
 - llvm-cov 覆盖率门禁（本机未装 `cargo llvm-cov`；`--fail-under-lines 80` 命令已写入 CI 建议）
 
+### Phase L 发布（v0.9.0，2026-09-18）
+
+- **Release**：https://github.com/lza6/Freebuff-2API/releases/tag/v0.9.0
+- **资产**：Freebuff2API-Setup-0.9.0.exe（85.7MB NSIS 安装包）· freebuff2api.exe（13.2MB 网关二进制）· latest.yml（自动更新 feed）
+- **说明**：tag 由 CI 触发构建；因本地网络限制，安装包资产经本地 electron-builder 构建后手动上传（softprops 在 workflow_dispatch + 移动 tag 场景有已知 bug `Error creating asset temp dir`，正常 tag push 不受影响，v0.8.0 已验证）
+
 ## Phase J 存档（v0.7.0 已发布）
 
 - WebView2 一键登录（commit d09397a）；J6 完整成功路径（人工登录）待用户配合一次
