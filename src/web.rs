@@ -174,6 +174,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
     <div class="panel"><h2>最近请求 <span style="font-weight:400">（点击行查看详情）</span></h2><div id="reqs-wrap"></div></div>
     <div class="panel"><h2>可用模型（<span id="model-count">…</span>）</h2><div id="models-wrap"></div></div>
     <div class="panel" id="balance-panel" style="display:none"><h2>账号积分</h2><div id="balance-wrap"></div></div>
+    <div class="panel" id="recommend-panel" style="display:none"><h2>🎯 今日推荐</h2><div id="recommend-wrap"><div class="empty">加载中…</div></div></div>
   </section>
 
   <section id="tab-account" style="display:none">
@@ -186,6 +187,12 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
         <button class="ghost sm" onclick="refreshCredential()">🔄 保活检查</button>
       </div>
       <div id="overview-wrap"><div class="empty">点「刷新」拉取账号信息（身份 / 连续使用天数 / token 消耗 / 套餐 / 今日剩余积分）</div></div>
+    </div>
+
+    <!-- 凭证健康看板（v0.9 §2.1） -->
+    <div class="panel">
+      <div class="row" style="margin-bottom:8px"><h2 style="margin:0">🩺 凭证健康看板</h2><span style="flex:1"></span><button class="ghost sm" onclick="refreshHealth()">刷新</button></div>
+      <div id="health-wrap"><div class="empty">加载中…</div></div>
     </div>
 
     <!-- 添加账号（一键登录向导 / 粘贴导入） -->
@@ -424,24 +431,33 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
     </div>
   </section>
 
-  <!-- 对话测试台（v0.8 新增） -->
+  <!-- 对话测试台（v0.8 新增 / v0.9：多轮 + 图片 + effort） -->
   <section id="tab-play" style="display:none">
     <div class="panel">
       <h2>💬 对话测试台</h2>
-      <p style="font-size:13px;color:var(--muted);margin-bottom:10px">不发请求到上游就验证网关链路：选模型 → 输入消息 → 流式渲染回复（调 <code>/v1/chat/completions</code>）。</p>
-      <div class="row" style="margin-bottom:10px">
-        <select id="play-model" style="max-width:320px;flex:1"></select>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:10px">不发请求到上游就验证网关链路：选模型（可调思考档位）→ 输入消息（支持粘贴/拖拽图片）→ 流式渲染回复。支持多轮上下文（会话历史留在本页）。</p>
+      <div class="row" style="margin-bottom:10px;flex-wrap:wrap;gap:8px">
+        <select id="play-model" style="max-width:280px;flex:1;min-width:160px"></select>
+        <select id="play-effort" style="max-width:180px;display:none" title="思考档位（按模型阶梯）"></select>
         <button class="ghost sm" onclick="loadModelsIntoPlay()">刷新模型</button>
       </div>
-      <textarea id="play-input" placeholder="输入一条消息，例如：用一句话介绍你自己" style="min-height:64px"></textarea>
-      <div class="row" style="margin-top:8px">
+      <textarea id="play-system" placeholder="（可选）System 提示词，例如：你是资深 Rust 工程师" style="min-height:40px"></textarea>
+      <div id="play-images" class="row" style="gap:6px;margin:8px 0 0"></div>
+      <div id="play-drop" style="border:1px dashed var(--border);border-radius:8px;padding:10px 12px;margin-top:8px;font-size:12px;color:var(--muted);cursor:pointer" onclick="document.getElementById('play-file').click()" ondragover="event.preventDefault()" ondrop="playDrop(event)">🖼 点击 / 拖拽 / 粘贴添加图片（上传到上游换取 storageId；需 web Cookie，失败自动降级 base64）</div>
+      <input type="file" id="play-file" accept="image/*" multiple style="display:none" onchange="playAddFiles(this.files)">
+      <textarea id="play-input" placeholder="输入一条消息，例如：用一句话介绍你自己（Ctrl+Enter 发送）" style="min-height:64px" onkeydown="if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();playSend();}" onpaste="playPaste(event)"></textarea>
+      <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:8px">
         <button onclick="playSend()">🚀 发送</button>
         <button class="ghost sm" onclick="playStop()">停止</button>
-        <button class="ghost sm" onclick="playClear()">清空</button>
+        <button class="ghost sm" onclick="playNewSession()">新会话</button>
+        <button class="ghost sm" onclick="playCopyOut()">复制回复</button>
+        <button class="ghost sm" onclick="playExportMd()">导出 Markdown</button>
         <span id="play-status" style="font-size:12px;color:var(--muted)"></span>
       </div>
-      <div id="play-output" class="logs" style="margin-top:10px;max-height:360px;font-size:13px"><div class="empty">回复会实时显示在这里</div></div>
+      <div id="play-output" class="logs" style="margin-top:10px;max-height:400px;font-size:13px"><div class="empty">回复会实时显示在这里</div></div>
     </div>
+  </section>
+
   </section>
 
   <!-- 设置页（v0.8 新增） -->
@@ -450,6 +466,16 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
       <h2>⚙️ 设置</h2>
       <p style="font-size:13px;color:var(--muted);margin-bottom:12px">修改后写回 <code>config.json</code>（原子写，不覆盖其他配置）。<b>监听地址与部分项需重启生效</b>。</p>
       <div id="settings-wrap"><div class="empty">加载中…</div></div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h2>📦 数据迁移（导出 / 导入）</h2>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:10px">一键打包 config（脱敏，不含 api_keys/auth_tokens 明文）+ 凭证 + 技能启用态 + 记忆开关，换机迁移。导入前自动备份到 <code>data/backup-&lt;时间戳&gt;/</code>。</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button onclick="exportConfig()">⬇ 导出配置</button>
+        <button onclick="document.getElementById('import-file').click()">⬆ 导入配置</button>
+        <input type="file" id="import-file" accept=".json,application/json" style="display:none" onchange="importConfig(this.files)">
+        <span id="migrate-status" style="font-size:12px;color:var(--muted)"></span>
+      </div>
     </div>
   </section>
 
@@ -503,8 +529,8 @@ function showTab(name) {
   if (name === 'skills') refreshSkills();
   if (name === 'memory') refreshMemory();
   if (name === 'doctor') refreshDoctor();
-  if (name === 'account') { pingExtension(); refreshTokens(); loadHistory(); }
-  if (name === 'overview') { loadBalance(); loadGuide(); }
+  if (name === 'account') { pingExtension(); refreshTokens(); loadHistory(); refreshHealth(); }
+  if (name === 'overview') { loadBalance(); loadRecommend(); loadGuide(); }
   if (name === 'logs') initLogs();
   if (name === 'guide') loadGuide();
   if (name === 'play') loadModelsIntoPlay();
@@ -512,81 +538,173 @@ function showTab(name) {
   if (name === 'about') loadAbout();
 }
 
-// ---------- 对话测试台（v0.8） ----------
+// ---------- 对话测试台（v0.8；v0.9：多轮 + 图片 + effort + 复制/导出） ----------
 let playAbort = null;
+let playHistory = [];      // [{role:'user'|'assistant', content}]
+let playImages = [];       // {name, dataUrl}
+const playModelMeta = {};  // id -> /v1/models meta
+
+function playAddFiles(files, fromPaste) {
+  for (const f of Array.from(files || [])) {
+    if (!f || !f.type || !f.type.startsWith('image/')) { if (!fromPaste) toast('仅支持图片文件', 3000); continue; }
+    if (f.size > 15 * 1024 * 1024) { toast('图片超过 15MB，已跳过：' + f.name, 3000); continue; }
+    const reader = new FileReader();
+    reader.onload = () => { playImages.push({ name: f.name || 'paste-' + playImages.length + '.png', dataUrl: String(reader.result) }); renderPlayImages(); };
+    reader.readAsDataURL(f);
+  }
+}
+function playDrop(ev) { ev.preventDefault(); playAddFiles(ev.dataTransfer && ev.dataTransfer.files); }
+function playPaste(ev) {
+  const files = ev.clipboardData && ev.clipboardData.files;
+  if (files && files.length) { ev.preventDefault(); playAddFiles(files, true); }
+}
+function renderPlayImages() {
+  const w = $('play-images'); if (!w) return;
+  if (!playImages.length) { w.innerHTML = ''; return; }
+  w.innerHTML = playImages.map((im, i) =>
+    `<span style="position:relative;display:inline-block"><img src="${esc(im.dataUrl)}" style="width:56px;height:56px;border-radius:8px;object-fit:cover;border:1px solid var(--border)" alt=""><button class="sm" style="position:absolute;top:-8px;right:-8px;padding:1px 6px" onclick="playRemoveImage(${i})">✕</button></span>`
+  ).join('') + `<span style="font-size:12px;color:var(--muted)">${playImages.length} 张</span>`;
+}
+function playRemoveImage(i) { playImages.splice(i, 1); renderPlayImages(); }
 async function loadModelsIntoPlay() {
   const sel = $('play-model'); if (!sel) return;
   try {
     const m = await api('/v1/models');
     const list = (m && m.data || []).map(x => x.id);
+    if (Array.isArray(m.meta)) m.meta.forEach(mm => { if (mm && mm.id) playModelMeta[mm.id] = mm; });
     const cur = sel.value;
     sel.innerHTML = list.length ? list.map(id => `<option value="${esc(id)}" ${id===cur?'selected':''}>${esc(id)}</option>`).join('')
       : '<option value="">（无模型）</option>';
     if (!list.includes(cur)) sel.value = list[0] || '';
+    renderPlayEffort();
   } catch (e) { sel.innerHTML = `<option value="z-ai/glm-5.3-flash">z-ai/glm-5.3-flash（读取失败，用默认）</option>`; }
+}
+function renderPlayEffort() {
+  const sel = $('play-effort'); if (!sel) return;
+  const model = $('play-model') ? $('play-model').value : '';
+  const meta = playModelMeta[model];
+  const efforts = meta && Array.isArray(meta.efforts) && meta.efforts.length ? meta.efforts : null;
+  const cur = sel.value;
+  sel.innerHTML = efforts ? ['<option value="">思考档位（默认）</option>'].concat(efforts.map(e => `<option value="${esc(e)}">${esc(e)}</option>`)).join('') : '';
+  sel.style.display = efforts ? '' : 'none';
+  if (cur && efforts && efforts.includes(cur)) sel.value = cur;
+  if ($('play-model')) $('play-model').onchange = renderPlayEffort;
+}
+function renderConversation() {
+  const msgs = playHistory.map(h => `<div class="kv" style="border-bottom:1px solid var(--border);padding:6px 0"><b>${h.role === 'user' ? '🧑 user' : '🤖 assistant'}</b><div style="white-space:pre-wrap;margin-top:2px">${esc(h.content)}</div></div>`).join('');
+  return msgs || '<div class="empty">回复会实时显示在这里</div>';
 }
 async function playSend() {
   const out = $('play-output'); if (!out) return;
   const model = $('play-model').value || 'z-ai/glm-5.3-flash';
   const text = $('play-input').value.trim();
-  if (!text) { toast('请输入消息', 3000); return; }
+  const sys = $('play-system').value.trim();
+  if (!text && !playImages.length) { toast('请输入消息', 3000); return; }
   if (playAbort) playAbort.abort();
   playAbort = new AbortController();
+  const effort = $('play-effort') ? $('play-effort').value : '';
+  const btn = document.querySelector('#tab-play button[onclick="playSend()"]'); if (btn) btn.disabled = true;
   $('play-status').textContent = '请求中…';
-  out.innerHTML = '<div class="empty">等待回复…</div>';
   const started = Date.now();
   try {
+    // 图片：优先 POST /v1/uploads 换 storageId（多模态链路），失败降级 base64 文本
+    const imgRefs = [];
+    for (const im of playImages) {
+      try {
+        const b64 = (im.dataUrl.split(',')[1] || '');
+        const bytes = base64ToBytes(b64);
+        const r = await fetch('/v1/uploads', {
+          method: 'POST',
+          headers: Object.assign({ 'x-file-name': encodeURIComponent(im.name) }, apiKey() ? { 'authorization': 'Bearer ' + apiKey() } : {}),
+          body: bytes, signal: playAbort.signal,
+        });
+        if (r.ok) { const j = await r.json().catch(() => ({})); imgRefs.push(j.storageId || j.url || j.data || j.data_url || j.path || im.dataUrl); }
+        else { imgRefs.push(im.dataUrl); toast('图片上传失败，已降级 base64', 3000); }
+      } catch (e2) { imgRefs.push(im.dataUrl); }
+    }
+    const userContent = imgRefs.length ? `${text ? text + '\n' : ''}[图片] ${imgRefs.join(' ')}` : text;
+    const msgs = [];
+    if (sys) msgs.push({ role: 'system', content: sys });
+    playHistory.forEach(h => msgs.push(h));
+    msgs.push({ role: 'user', content: userContent });
+    const body = { model, messages: msgs, stream: true };
+    if (effort) body.reasoning_effort = effort;
     const resp = await fetch('/v1/chat/completions', {
       method: 'POST',
       headers: Object.assign({ 'content-type': 'application/json' }, apiKey() ? { 'authorization': 'Bearer ' + apiKey() } : {}),
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: text }], stream: true }),
-      signal: playAbort.signal,
+      body: JSON.stringify(body), signal: playAbort.signal,
     });
     if (!resp.ok || !resp.body) {
       const err = await resp.text().catch(() => '');
-      let msg = `HTTP ${resp.status}`;
-      try { msg = JSON.parse(err).error?.message || msg; } catch (e) {}
-      out.innerHTML = `<div class="lv-error">❌ 请求失败：${esc(msg)}</div>`;
-      $('play-status').textContent = `失败（${Date.now()-started}ms）`;
-      return;
+      let msg = 'HTTP ' + resp.status;
+      try { msg = JSON.parse(err).error?.message || msg; } catch (e3) {}
+      throw new Error(msg);
     }
+    out.innerHTML = renderConversation();
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
-    let buf = '';
-    let content = '';
-    out.innerHTML = '';
+    let buf = '', content = '', asstEl = null;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buf += dec.decode(value, { stream: true });
-      // 按行解析 SSE（缓冲不完整块）
       let idx;
       while ((idx = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 1);
+        const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
         if (!line.startsWith('data:')) continue;
         const data = line.slice(5).trim();
         if (data === '[DONE]') { buf = ''; break; }
         try {
           const j = JSON.parse(data);
-          const delta = j.choices?.[0]?.delta?.content || '';
+          const delta = (j.choices && j.choices[0] && j.choices[0].delta && (j.choices[0].delta.content || '')) || '';
           if (delta) {
             content += delta;
-            out.innerHTML = `<div style="white-space:pre-wrap">${esc(content)}</div>`;
+            if (!asstEl) { out.insertAdjacentHTML('beforeend', `<div class="kv" style="border-bottom:1px solid var(--border);padding:6px 0"><b>🤖 assistant</b><div style="white-space:pre-wrap;margin-top:2px">${esc(content)}</div></div>`); asstEl = out.lastElementChild; }
+            else { out.lastElementChild.lastElementChild.textContent = content; }
             out.scrollTop = out.scrollHeight;
           }
-        } catch (e) { /* 忽略解析中间块 */ }
+        } catch (e4) { /* 忽略中间块 */ }
       }
     }
+    playHistory.push({ role: 'user', content: userContent });
+    if (content) playHistory.push({ role: 'assistant', content });
     $('play-status').textContent = content ? `完成（${Date.now()-started}ms，${content.length} 字符）` : '完成（无内容）';
+    $('play-input').value = '';
+    playImages = []; renderPlayImages();
   } catch (e) {
-    if (e.name === 'AbortError') { out.innerHTML = '<div class="empty">已停止</div>'; $('play-status').textContent = '已停止'; }
-    else { out.innerHTML = `<div class="lv-error">❌ 网络错误：${esc(e.message)}</div>`; $('play-status').textContent = '网络错误'; }
-  } finally { playAbort = null; }
+    if (e.name === 'AbortError') { $('play-status').textContent = '已停止'; }
+    else { out.innerHTML = renderConversation() + `<div class="lv-error">❌ 请求失败：${esc(e.message)}</div>`; $('play-status').textContent = '失败（' + (Date.now()-started) + 'ms）'; }
+  } finally { if (playAbort) playAbort = null; const btn2 = document.querySelector('#tab-play button[onclick="playSend()"]'); if (btn2) btn2.disabled = false; }
 }
 function playStop() { if (playAbort) playAbort.abort(); }
-function playClear() { $('play-output').innerHTML = '<div class="empty">回复会实时显示在这里</div>'; $('play-status').textContent = ''; $('play-input').value = ''; }
-
+function playNewSession() {
+  if (playAbort) playAbort.abort();
+  playHistory = []; playImages = [];
+  $('play-output').innerHTML = '<div class="empty">回复会实时显示在这里</div>';
+  $('play-status').textContent = ''; $('play-input').value = ''; $('play-system').value = '';
+  renderPlayImages();
+}
+function playClear() { playNewSession(); }
+function playCopyOut() {
+  const out = $('play-output');
+  const txt = out ? out.innerText.replace(/^回复会实时显示在这里\n?/, '') : '';
+  if (!txt.trim()) { toast('没有可复制的内容', 2500); return; }
+  navigator.clipboard?.writeText(txt.trim()).then(() => toast('已复制')).catch(() => toast('复制失败，请手动选择'));
+}
+function playExportMd() {
+  const md = playHistory.map(h => `**${h.role}**\n\n${h.content}`).join('\n\n---\n\n');
+  if (!md.trim()) { toast('会话为空，无可导出', 2500); return; }
+  const blob = new Blob([md], { type: 'text/markdown' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'freebuff2api-chat.md'; a.click();
+  URL.revokeObjectURL(a.href); toast('已导出 Markdown');
+}
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr;
+}
 // ---------- 设置页（v0.8） ----------
 // 设置项渲染规格（key → label/type/hint）
 const SETTINGS_SPEC = [
@@ -859,6 +977,14 @@ async function openDrawer(id) {
     html += `<div class="kv"><b>实际模型</b>${esc(r.resolved_model || r.model)}</div>`;
     html += `<div class="kv"><b>状态</b>${r.status} ${esc(r.error_kind ? '(' + r.error_kind + ')' : '')}</div>`;
     html += `<div class="kv"><b>延迟</b>${(r.latency_ms / 1000).toFixed(2)}s${r.ttft_ms ? '（首字节 ' + r.ttft_ms + 'ms）' : ''}</div>`;
+    if (r.latency_ms) {
+      const ttftPct = r.ttft_ms != null ? Math.max(0, Math.min(100, Math.round(r.ttft_ms / r.latency_ms * 100))) : null;
+      html += `<div style="margin-top:10px"><b style="font-size:12px">⏱ 耗时时间线</b>` +
+        `<div style="position:relative;height:8px;background:#21262d;border-radius:4px;margin-top:6px">` +
+        `<div style="position:absolute;left:0;top:0;height:8px;border-radius:4px;background:var(--accent);width:${ttftPct == null ? 100 : ttftPct}%"></div>` +
+        (ttftPct != null ? `<div style="position:absolute;left:${ttftPct}%;width:2px;height:8px;background:var(--warn)"></div>` : '') +
+        `</div><div style="display:flex;font-size:11px;color:var(--muted);margin-top:4px"><span>首字节 ${r.ttft_ms != null ? r.ttft_ms + 'ms' : '—'}</span><span style="flex:1"></span><span>总耗时 ${(r.latency_ms / 1000).toFixed(2)}s</span></div></div>`;
+    }
     html += `<div class="kv"><b>Tokens</b>输入 ${r.prompt_tokens || 0} / 输出 ${r.completion_tokens || 0}</div>`;
     if (r.route_reason) html += `<div class="kv"><b>路由原因</b>${esc(r.route_reason)}</div>`;
     if (r.error_excerpt) html += `<details open><summary>错误详情</summary><pre>${esc(r.error_excerpt)}</pre></details>`;
@@ -1557,8 +1683,86 @@ async function refreshDoctor() {
   } catch (e) { $('doctor-wrap').innerHTML = `<div class="empty">体检失败：${esc(e.message)}</div>`; }
 }
 
+// ---------- 凭证健康看板（v0.9 §2.1） ----------
+function stateBadge(s) {
+  if (s === 'closed' || s === 'half_open') return s === 'half_open' ? '<span class="badge warn">half</span>' : '<span class="badge ok">closed</span>';
+  if (s === 'half') return '<span class="badge warn">half</span>';
+  return '<span class="badge err">open</span>';
+}
+async function refreshHealth() {
+  const w = $('health-wrap'); if (!w) return;
+  w.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const d = await api('/api/accounts/health');
+    const rows = d.accounts || [];
+    if (!rows.length) { w.innerHTML = '<div class="empty">暂无凭证健康数据（先导入 Cookie / Bearer）</div>'; return; }
+    w.innerHTML = '<div style="overflow-x:auto"><table style="width:100%"><thead><tr><th>凭证</th><th>类型</th><th>熔断</th><th>评分</th><th>失败</th><th>冷却</th><th>最近错误 / 时间线</th></tr></thead><tbody>' +
+      rows.map(r => {
+        const hist = (r.history || []).slice(0, 10);
+        const tl = hist.length ? `<details style="margin:4px 0 0"><summary>时间线（${hist.length}）</summary>${hist.map(h => `<div class="kv" style="font-size:12px"><b>${fmtTime(h.ts)} ${h.type === 'ok' ? '✅' : '❌'}</b>${esc(h.detail || '')}</div>`).join('')}</details>` : '';
+        return `<tr><td>${esc((r.masked || r.id || '').slice(0, 26))}</td><td>${esc(r.kind || '—')}</td><td>${stateBadge(r.circuit_state)}</td><td>${Number(r.health_score || 0).toFixed(0)}</td><td>${r.trips || 0}</td><td>${esc(r.cooldown_until ? fmtTime(r.cooldown_until) : '—')}</td><td style="max-width:240px"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.last_error || '—')}</div>${tl}</td></tr>`;
+      }).join('') + '</tbody></table></div>';
+  } catch (e) { w.innerHTML = `<div class="empty">健康看板加载失败：${esc(e.message)}</div>`; }
+}
+
+// ---------- 今日推荐（v0.9 §2.2） ----------
+async function loadRecommend() {
+  const w = $('recommend-wrap'); if (!w) return;
+  try {
+    const r = await fetch('/api/account/balance', { headers: apiKey() ? { authorization: 'Bearer ' + apiKey() } : {} });
+    if (!r.ok) { $('recommend-panel').style.display = 'none'; return; }
+    const b = await r.json();
+    const mr = b.model_remaining || {};
+    const rows = Object.entries(mr);
+    if (!rows.length) { $('recommend-panel').style.display = 'none'; return; }
+    rows.sort((x, y) => (x[1].usable_today === -1 ? 0 : 1) - (y[1].usable_today === -1 ? 0 : 1));
+    const top = rows.slice(0, 5);
+    $('recommend-panel').style.display = '';
+    w.innerHTML = '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">按上游 rateLimitsByModel 今日剩余次数排序（已暂停模型自动靠后）</div>' +
+      '<div style="overflow-x:auto"><table style="width:100%"><thead><tr><th>模型</th><th>今日剩余</th><th>积分价</th></tr></thead><tbody>' +
+      top.map(([m, v]) => `<tr><td>${esc(m)}</td><td><b>${v.usable_today === -1 ? '不限' : (v.usable_today ?? '—')}</b></td><td>${v.price === 0 ? '<b class="tok">免费</b>' : (v.price ?? '—')}</td></tr>`).join('') +
+      '</tbody></table></div>';
+  } catch (e) { $('recommend-panel').style.display = 'none'; }
+}
+
+// ---------- 数据迁移（v0.9 §2.3） ----------
+async function exportConfig() {
+  const st = $('migrate-status'); if (st) st.textContent = '导出中…';
+  try {
+    const d = await api('/api/export');
+    const blob = new Blob([JSON.stringify({ data: d.data }, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'freebuff2api-export-' + new Date().toISOString().slice(0, 10) + '.json'; a.click();
+    URL.revokeObjectURL(a.href);
+    if (st) st.textContent = '已导出（含 ' + (d.data.tokens || []).length + ' 条凭证）';
+    toast('已导出配置');
+  } catch (e) { if (st) st.textContent = ''; toast('导出失败：' + e.message, 3500); }
+}
+async function importConfig(files) {
+  const f = files && files[0]; const st = $('migrate-status');
+  if (!f) return;
+  let parsed;
+  try { parsed = JSON.parse(await f.text()); }
+  catch (e) { if (st) st.textContent = ''; toast('JSON 解析失败', 3000); return; }
+  const data = parsed && parsed.data ? parsed.data : parsed;
+  const tokens = (data && data.tokens) || [];
+  const skills = (data && data.skills) || [];
+  const mem = data && data.memory_enabled;
+  const okc = confirm('将导入：\n· 凭证 ' + tokens.length + ' 条（覆盖本机 tokens.json，导入前自动备份）\n· 技能启用态 ' + skills.length + ' 项\n· 记忆开关：' + (mem === undefined ? '不变' : (mem ? '开启' : '关闭')) + '\n· config 白名单字段（api_keys/auth_tokens 不会被覆盖）\n\n继续？');
+  if (!okc) { if (st) st.textContent = ''; return; }
+  if (st) st.textContent = '导入中…';
+  try {
+    const r = await api('/api/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data }) });
+    const s = r.imported || {};
+    const msg = '导入完成：tokens ' + (s.tokens ?? 0) + ' 条' + (s.backed_up_to ? '，备份至 ' + s.backed_up_to : '');
+    if (st) st.textContent = msg; toast('导入成功');
+    refreshTokens(); loadSettings();
+  } catch (e) { if (st) st.textContent = ''; toast('导入失败：' + e.message, 4000); }
+}
+
 // ---------- 启动 ----------
 refreshOverview();
+loadRecommend();
 loadGuide();
 // 扩展可能在页面加载后才被激活，启动后多探几次（最多 5 次，探测到即停）
 renderExtStatus();
