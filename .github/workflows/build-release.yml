@@ -24,7 +24,7 @@ jobs:
           # 锁定与本地验证一致的版本，避免最新 stable 的 clippy 新 lint 触发 -D warnings
           toolchain: 1.95.0
           targets: x86_64-pc-windows-msvc
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache cargo
         uses: actions/cache@v4
