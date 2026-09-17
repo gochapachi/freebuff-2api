@@ -183,6 +183,7 @@ async fn build_state(base_url: String) -> Arc<AppState> {
         RouterConfig::from_app_config(&cfg),
     ));
     let pool = Arc::new(Pool::new(&cfg, client.clone()));
+    let web_pool = Arc::new(freebuff2api::web_pool::WebCookiePool::new(&cfg));
     let usage = Arc::new(UsageDb::open(&cfg.sqlite_path).unwrap());
     let telemetry =
         Arc::new(TelemetryWriter::spawn(PathBuf::from(&cfg.telemetry_path), 64).unwrap());
@@ -210,6 +211,7 @@ async fn build_state(base_url: String) -> Arc<AppState> {
         cfg: Arc::new(cfg),
         client,
         pool,
+        web_pool,
         registry,
         router,
         usage,
@@ -437,6 +439,7 @@ async fn empty_pool_with_web_cookie_triggers_bridge() {
         RouterConfig::from_app_config(&cfg),
     ));
     let pool = Arc::new(Pool::new(&cfg, client.clone()));
+    let web_pool = Arc::new(freebuff2api::web_pool::WebCookiePool::new(&cfg));
     let usage = Arc::new(UsageDb::open(&cfg.sqlite_path).unwrap());
     let telemetry =
         Arc::new(TelemetryWriter::spawn(PathBuf::from(&cfg.telemetry_path), 64).unwrap());
@@ -463,6 +466,7 @@ async fn empty_pool_with_web_cookie_triggers_bridge() {
         cfg: Arc::new(cfg),
         client,
         pool,
+        web_pool,
         registry,
         router,
         usage,
@@ -536,4 +540,42 @@ async fn upstream_401_is_handled_with_auth_expired() {
         body.contains("auth") || body.contains("401") || body.contains("attempts"),
         "应含错误信息: {body}"
     );
+}
+
+#[tokio::test]
+async fn non_loopback_peer_denied_admin_without_keys() {
+    // v0.9 §1.5 鉴权纵深：即使没有任何代理头，
+    // 真实 TCP 对端非回环（模拟 0.0.0.0 监听 + 局域网直连）+ 未配置 api_keys → 管理端点 401。
+    // 生产路径由 main 用 into_make_service_with_connect_info 注入 ConnectInfo；
+    // 这里用 req.extensions_mut() 忠实注入同一扩展类型。
+    let base = start_mock(MockMode::JsonOk).await;
+    let state = build_state(base).await;
+    let app = build_router(Arc::unwrap_or_clone(state));
+
+    let peer = "192.168.1.5:54321".parse::<std::net::SocketAddr>().unwrap();
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/accounts/health")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(peer));
+    let resp: Response<Body> = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "非回环 peer + 无 api_keys → 管理端点必须 401"
+    );
+
+    // 对照：同一端点 + 回环 peer（127.0.0.1）→ 默认行为不变，正常放行
+    let mut req2 = Request::builder()
+        .method(Method::GET)
+        .uri("/healthz")
+        .body(Body::empty())
+        .unwrap();
+    req2.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:47821".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let resp2: Response<Body> = app.oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK, "回环 peer 应保持默认放行");
 }
