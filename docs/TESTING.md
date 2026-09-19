@@ -34,10 +34,13 @@ node tests/e2e_phase_v0_8.cjs 47980 config.e2e.json
 node tests/e2e_phase_v0_9.cjs 47980 config.e2e.json
 ```
 
-## 四、覆盖率
+## 四、覆盖率（v0.10.2 基线，2026-09-19 本机实测）
 
-- CI：`.github/workflows/build-release.yml` coverage job（`cargo llvm-cov --fail-under-lines 80`，当前 continue-on-error=true 收集基线；v0.10 目标：本机记录真实基线 → 移除 continue-on-error 收紧，见 计划书/下一步改进指南.md §3.1）。
-- 本机安装：`cargo install cargo-llvm-cov --locked`；跑：`cargo llvm-cov --fail-under-lines 80`。
+- 工具：`cargo-llvm-cov 0.9.1`（`cargo install cargo-llvm-cov --locked`；需 `rustup component add llvm-tools-preview`），跑：`cargo llvm-cov --fail-under-lines 65`
+- **TOTAL 行覆盖率 66.8%**；**CI 已收紧为真门禁**：`--fail-under-lines 65` + `continue-on-error: false`（留 1.8pt 环境缓冲）
+- 关键业务模块 ≥80%：models 83.2 / telemetry 94.4 / router 89.0 / web_pool 84.6 / errors 97.9 / retry 94.1 / redact 98.5 / import 92.8 / mcp 98.6 / memory 93.9 / export 84.0 / account_meta 81.6
+- 拉低总体：api.rs 30.6（HTTP 单体，靠集成/E2E 覆盖）、main.rs 0（启动路径）、upstream 51.6 / session 65.6 / web_protocol 78.5（网络层，需 Mock 上游）
+- **提升路径（backlog）**：补 api.rs 集成测试（Mock 上游扩 case）→ 70% → 75% → 80%
 
 ## 五、环境限制（诚实披露）
 
