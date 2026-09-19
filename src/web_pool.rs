@@ -64,6 +64,8 @@ pub struct WebCookieHealth {
     pub health_score: f64,
     pub circuit_state: String,
     pub cooldown_until: Option<String>,
+    /// v0.10：冷却剩余秒（面板排序/预估恢复用）
+    pub cooldown_seconds: Option<u64>,
     pub trips: u64,
     pub last_error: Option<String>,
     pub last_ok_at: Option<String>,
@@ -81,11 +83,17 @@ fn mask(cookie: &str) -> String {
     format!("{}...{}", &cookie[..6], &cookie[cookie.len() - 4..])
 }
 
-fn cooldown_str(instant: Option<Instant>) -> Option<String> {
+/// 冷却到期时刻 → ISO8601 UTC（v0.10：面板按时间轴展示；剩余秒单独给 cooldown_seconds）
+fn cooldown_iso(instant: Option<Instant>) -> Option<String> {
     instant.map(|i| {
         let d = i.saturating_duration_since(Instant::now());
-        format!("{}s", d.as_secs())
+        (chrono::Utc::now() + chrono::Duration::from_std(d).unwrap_or_default()).to_rfc3339()
     })
+}
+
+/// 冷却剩余秒
+fn cooldown_secs(instant: Option<Instant>) -> Option<u64> {
+    instant.map(|i| i.saturating_duration_since(Instant::now()).as_secs())
 }
 
 impl WebEntry {
@@ -290,7 +298,8 @@ impl WebCookiePool {
                     crate::pool::CircuitState::Open => "open".into(),
                     crate::pool::CircuitState::HalfOpen => "half_open".into(),
                 },
-                cooldown_until: cooldown_str(e.breaker.open_until),
+                cooldown_until: cooldown_iso(e.breaker.open_until),
+                cooldown_seconds: cooldown_secs(e.breaker.open_until),
                 trips: e.breaker.trips,
                 last_error: e.breaker.last_reason.clone(),
                 last_ok_at: e.last_ok_at.map(|i| format!("{i:?}")),

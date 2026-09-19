@@ -168,6 +168,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/usage/requests/{id}", get(handle_usage_request_detail))
         .route("/api/usage/models", get(handle_usage_models))
         .route("/api/usage/cost", get(handle_usage_cost))
+        .route("/api/usage/insights", get(handle_usage_insights))
         .route("/api/usage/accounts", get(handle_accounts))
         .route(
             "/api/skills",
@@ -280,10 +281,11 @@ fn secure_headers(mut resp: axum::response::Response) -> axum::response::Respons
 // ---------- 面板 & 健康 ----------
 
 async fn handle_dashboard() -> impl IntoResponse {
+    // v0.10 §1.5：面板构建失败不 panic（http::Response: Default）
     Response::builder()
         .header("content-type", "text/html; charset=utf-8")
         .body(Body::from(crate::web::INDEX_HTML))
-        .unwrap()
+        .unwrap_or_default()
 }
 
 async fn handle_healthz(State(st): State<AppState>, headers: HeaderMap) -> Response {
@@ -707,6 +709,10 @@ async fn handle_web_chat(
         None => (String::new(), None),
     };
     let cookie = if cookie.is_empty() {
+        // v0.10 §1.4：池非空但全部冷却 → 结构化降级；否则保留"未导入"文案
+        if st.web_pool.count().await > 0 {
+            return web_pool_exhausted(&st).await;
+        }
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": { "message": "未导入 web Cookie 凭证。请 POST /api/tokens/import 粘贴 Cookie", "type": "invalid_request_error" } })),
@@ -941,7 +947,7 @@ async fn handle_web_chat(
                 .header("connection", "keep-alive")
                 .header("x-accel-buffering", "no")
                 .body(Body::from_stream(body_stream))
-                .unwrap()
+                .unwrap_or_default()
         }
         Err(e) => {
             // v0.9：401/403/网络失败 → 池内降分/熔断/冷却，下个请求自动换号
@@ -1284,7 +1290,7 @@ async fn web_bridge_openai(
         .header("connection", "keep-alive")
         .header("x-accel-buffering", "no")
         .body(Body::from_stream(body_stream))
-        .unwrap()
+        .unwrap_or_default()
 }
 
 /// 桥接路径完成日志（后台任务收尾时调用，避免闭包捕获整个 AppState）
@@ -1369,7 +1375,7 @@ async fn openai_error_to_claude(resp: Response, model: &str) -> Response {
             .header("content-type", "text/event-stream; charset=utf-8")
             .header("cache-control", "no-cache")
             .body(Body::from(events))
-            .unwrap(); // model 兜底已从 x-bridge-model 头读取
+            .unwrap_or_default(); // model 兜底已从 x-bridge-model 头读取
     }
 
     // JSON（成功或错误）
@@ -3263,7 +3269,10 @@ async fn handle_chat_completions(
                 total_ms as f64 / 1000.0
             ),
         );
-        return builder.body(Body::from(bytes)).unwrap().into_response();
+        return builder
+            .body(Body::from(bytes))
+            .unwrap_or_default()
+            .into_response();
     }
 
     // 流式：spawn 转发任务；旁路扫描 usage、记录首字节与总耗时
@@ -3369,7 +3378,7 @@ async fn handle_chat_completions(
     });
     builder
         .body(Body::from_stream(body_stream))
-        .unwrap()
+        .unwrap_or_default()
         .into_response()
 }
 
@@ -4015,7 +4024,7 @@ async fn handle_claude_messages(
             .header("content-type", "text/event-stream")
             .header("cache-control", "no-cache")
             .body(Body::from_stream(body_stream))
-            .unwrap()
+            .unwrap_or_default()
             .into_response()
     } else {
         let bytes = upstream_resp.bytes().await.unwrap_or_default();
@@ -4593,6 +4602,17 @@ async fn handle_usage_cost(State(st): State<AppState>, headers: HeaderMap) -> Re
         "cost_source": "免费层（无货币成本记录）",
     }))
     .into_response()
+}
+
+/// GET /api/usage/insights — "三最"聚合（最慢账号/最常用模型/错误率最高时段），本地 SQLite 聚合
+async fn handle_usage_insights(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authorized(&headers, &st) {
+        return admin_denied();
+    }
+    match crate::telemetry::insights(&st.cfg.telemetry_path, 24) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => internal_err(&e),
+    }
 }
 
 /// 写端点 CSRF 防护：要求 `application/json`。
@@ -5401,6 +5421,10 @@ async fn handle_upload(
         None => (String::new(), None),
     };
     let cookie = if cookie.is_empty() {
+        // v0.10 §1.4：池非空但全部冷却 → 结构化降级；否则保留"未导入"文案
+        if st.web_pool.count().await > 0 {
+            return web_pool_exhausted(&st).await;
+        }
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": { "message": "多模态上传需要 web Cookie 凭证（先 POST /api/tokens/import 导入）", "type": "invalid_request_error", "code": "multimodal_requires_web_cookie" } })),
@@ -5522,6 +5546,28 @@ fn bad_req(msg: &str) -> Response {
 
 /// 选取 web Cookie 凭证（v0.9 §1.1：从 WebCookiePool 按健康分/熔断/冷却挑选；
 /// config 与导入库凭证已在池构建时并入）。返回 cookie + 展示信息 + 稳定 id。
+/// v0.10 §1.4：web Cookie 池"全冷却/空池"的结构化降级错误（含最短恢复秒）
+async fn web_pool_exhausted(st: &AppState) -> Response {
+    let snap = st.web_pool.snapshot().await;
+    let cooling: Vec<u64> = snap.iter().filter_map(|s| s.cooldown_seconds).collect();
+    let min_sec = cooling.iter().min().copied().unwrap_or(0);
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": {
+                "message": format!(
+                    "所有 web Cookie 账号均不可用（池内 {} 个，冷却中 {} 个；最短约 {} 秒后恢复）。请到面板「账号」页检查或重新登录。",
+                    snap.len(), cooling.len(), min_sec
+                ),
+                "type": "pool_exhausted",
+                "code": "web_pool_exhausted",
+                "meta": { "pool_size": snap.len(), "cooling": cooling.len(), "cooldown_seconds_min": min_sec }
+            }
+        })),
+    )
+        .into_response()
+}
+
 async fn pick_web_cookie(st: &AppState) -> Option<(String, serde_json::Value, String)> {
     let p = st.web_pool.pick().await?;
     Some((p.cookie, p.cred, p.id))

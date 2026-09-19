@@ -253,6 +253,145 @@ fn insert_event(conn: &Connection, req_id: &str, kind: &str, detail: &str) -> Re
     Ok(())
 }
 
+/// "三最"遥测聚合：最慢账号 Top3、最常用模型 Top5、错误率最高时段 Top3。
+///
+/// - window_hours：>0 时只统计最近 N 小时；否则不限
+/// - 全部聚合在本地 SQLite 完成；空库返回空数组，不报错
+/// - account 空/NULL 回退 "unknown"；错误判定 status >= 400（覆盖 5xx）
+/// - 慢账号按总耗时均值(latency_ms)降序，并列按 TTFT 均值(ttft_ms)降序，
+///   同时返回 TTFT 均值（指南 2.3「TTFT 均值」口径）
+pub fn insights(db_path: &str, hours: i64) -> Result<serde_json::Value> {
+    let conn = open_db(Path::new(db_path))?;
+    let generated_at = Utc::now();
+    let cutoff = if hours > 0 {
+        (generated_at - chrono::Duration::hours(hours)).to_rfc3339()
+    } else {
+        "1970-01-01T00:00:00Z".to_string()
+    };
+
+    // 1) 最慢账号 Top3
+    let mut slowest_stmt = conn.prepare(
+        "SELECT COALESCE(NULLIF(TRIM(account), ''), 'unknown') AS acct,
+                COUNT(*), AVG(latency_ms), AVG(ttft_ms)
+         FROM requests_v2 WHERE ts >= ?1
+         GROUP BY COALESCE(NULLIF(TRIM(account), ''), 'unknown')",
+    )?;
+    let mut slowest: Vec<(String, i64, f64, Option<f64>)> = slowest_stmt
+        .query_map(params![cutoff], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, Option<f64>>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    slowest.sort_by(|a, b| {
+        b.2.partial_cmp(&a.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                b.3.unwrap_or(0.0)
+                    .partial_cmp(&a.3.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+    slowest.truncate(3);
+    let slowest_accounts: Vec<serde_json::Value> = slowest
+        .into_iter()
+        .map(|(acct, n, total, ttft)| {
+            serde_json::json!({
+                "account": acct,
+                "requests": n,
+                "avg_total_ms": (total * 10.0).round() / 10.0,
+                "avg_first_byte_ms": (ttft.unwrap_or(0.0) * 10.0).round() / 10.0,
+            })
+        })
+        .collect();
+    // 2) 最常用模型 Top5（请求数降序 + 错误率）
+    let mut model_stmt = conn.prepare(
+        "SELECT COALESCE(NULLIF(TRIM(resolved_model), ''), NULLIF(TRIM(requested_model), ''), 'unknown') AS model,
+                COUNT(*), SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END)
+         FROM requests_v2 WHERE ts >= ?1
+         GROUP BY COALESCE(NULLIF(TRIM(resolved_model), ''), NULLIF(TRIM(requested_model), ''), 'unknown')",
+    )?;
+    let mut models: Vec<(String, i64, i64)> = model_stmt
+        .query_map(params![cutoff], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    models.sort_by_key(|x| std::cmp::Reverse(x.1));
+    models.truncate(5);
+    let top_models: Vec<serde_json::Value> = models
+        .into_iter()
+        .map(|(model, n, errs)| {
+            serde_json::json!({
+                "model": model,
+                "requests": n,
+                "error_rate": if n > 0 { round_rate(errs as f64 / n as f64) } else { 0.0 },
+            })
+        })
+        .collect();
+
+    // 3) 错误率最高时段 Top3（按小时 UTC）
+    let mut hour_stmt = conn.prepare(
+        "SELECT substr(ts, 1, 13) AS hour_utc, COUNT(*),
+                SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END)
+         FROM requests_v2 WHERE ts >= ?1
+         GROUP BY substr(ts, 1, 13)",
+    )?;
+    let mut hour_rows: Vec<(String, i64, i64)> = hour_stmt
+        .query_map(params![cutoff], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    hour_rows.sort_by(|a, b| {
+        let ra = if a.1 > 0 {
+            a.2 as f64 / a.1 as f64
+        } else {
+            0.0
+        };
+        let rb = if b.1 > 0 {
+            b.2 as f64 / b.1 as f64
+        } else {
+            0.0
+        };
+        rb.partial_cmp(&ra)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.1.cmp(&a.1))
+    });
+    hour_rows.truncate(3);
+    let worst_hours: Vec<serde_json::Value> = hour_rows
+        .into_iter()
+        .map(|(hour, n, errs)| {
+            serde_json::json!({
+                "hour_utc": hour,
+                "requests": n,
+                "error_rate": if n > 0 { round_rate(errs as f64 / n as f64) } else { 0.0 },
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "window_hours": hours,
+        "slowest_accounts": slowest_accounts,
+        "top_models": top_models,
+        "worst_hours": worst_hours,
+        "generated_at": generated_at.to_rfc3339(),
+    }))
+}
+
+/// 归一到 4 位小数的错误率，避免浮点尾差
+fn round_rate(rate: f64) -> f64 {
+    (rate * 10_000.0).round() / 10_000.0
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,5 +573,152 @@ mod tests {
         // 句柄已释放：Windows 下应可直接删除整个目录
         let removed = std::fs::remove_dir_all(dir.path());
         assert!(removed.is_ok(), "SQLite 句柄未释放: {removed:?}");
+    }
+
+    /// 直接插入一条已知时间戳的请求（不走写线程，便于构造窗口/时段样本）
+    #[allow(clippy::too_many_arguments)] // 测试构造器：字段多，参数清晰优先
+    fn insert_direct(
+        conn: &Connection,
+        req_id: &str,
+        ts: &str,
+        account: &str,
+        model: &str,
+        status: i64,
+        latency_ms: i64,
+        ttft_ms: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO requests_v2 (req_id, ts, requested_model, resolved_model, account, status, latency_ms, ttft_ms)
+             VALUES (?1,?2,?3,?3,?4,?5,?6,?7)",
+            params![req_id, ts, model, account, status, latency_ms, ttft_ms],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn insights_slowest_accounts_ranking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telemetry.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let now = Utc::now().to_rfc3339();
+        insert_direct(
+            &conn,
+            "r1",
+            &now,
+            "acct-slow",
+            "gpt-4o",
+            200,
+            1000,
+            Some(400),
+        );
+        insert_direct(
+            &conn,
+            "r2",
+            &now,
+            "acct-slow",
+            "gpt-4o",
+            200,
+            800,
+            Some(300),
+        );
+        insert_direct(&conn, "r3", &now, "acct-mid", "gpt-4o", 200, 500, Some(200));
+        insert_direct(&conn, "r4", &now, "acct-fast", "claude", 200, 100, Some(50));
+        insert_direct(&conn, "r5", &now, "acct-fast", "claude", 200, 100, Some(60));
+        insert_direct(&conn, "r6", &now, "acct-fast", "claude", 200, 100, Some(70));
+
+        let v = insights(path.to_str().unwrap(), 24).unwrap();
+        let arr = v["slowest_accounts"].as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        let accounts: Vec<String> = arr
+            .iter()
+            .map(|x| x["account"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(accounts, vec!["acct-slow", "acct-mid", "acct-fast"]);
+        assert_eq!(arr[0]["requests"], 2);
+        assert_eq!(arr[0]["avg_total_ms"], 900.0);
+        assert_eq!(arr[0]["avg_first_byte_ms"], 350.0);
+        assert_eq!(arr[1]["avg_total_ms"], 500.0);
+        assert_eq!(arr[2]["avg_total_ms"], 100.0);
+    }
+
+    #[test]
+    fn insights_top_models_counts_and_error_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telemetry.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let now = Utc::now().to_rfc3339();
+        insert_direct(&conn, "a", &now, "acct", "gpt-4o", 200, 100, Some(10));
+        insert_direct(&conn, "b", &now, "acct", "gpt-4o", 400, 100, Some(10));
+        insert_direct(&conn, "c", &now, "acct", "gpt-4o", 500, 100, Some(10));
+        insert_direct(&conn, "d", &now, "acct", "gpt-4o", 200, 100, Some(10));
+        insert_direct(&conn, "e", &now, "acct", "claude", 200, 100, Some(10));
+        insert_direct(&conn, "f", &now, "acct", "claude", 200, 100, Some(10));
+
+        let v = insights(path.to_str().unwrap(), 24).unwrap();
+        let arr = v["top_models"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["model"], "gpt-4o");
+        assert_eq!(arr[0]["requests"], 4);
+        assert_eq!(arr[0]["error_rate"], 0.5);
+        assert_eq!(arr[1]["model"], "claude");
+        assert_eq!(arr[1]["requests"], 2);
+        assert_eq!(arr[1]["error_rate"], 0.0);
+    }
+    #[test]
+    fn insights_worst_hours_ranking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telemetry.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let h1 = "2026-09-19T08:00:00.000Z";
+        let h2 = "2026-09-19T09:00:00.000Z";
+        insert_direct(&conn, "a", h1, "acct", "gpt-4o", 500, 100, Some(10));
+        insert_direct(&conn, "b", h1, "acct", "gpt-4o", 200, 100, Some(10));
+        insert_direct(&conn, "c", h1, "acct", "gpt-4o", 200, 100, Some(10));
+        insert_direct(&conn, "d", h1, "acct", "gpt-4o", 200, 100, Some(10));
+        insert_direct(&conn, "e", h2, "acct", "claude", 200, 100, Some(10));
+        insert_direct(&conn, "f", h2, "acct", "claude", 200, 100, Some(10));
+
+        let v = insights(path.to_str().unwrap(), 24).unwrap();
+        let arr = v["worst_hours"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["hour_utc"], "2026-09-19T08");
+        assert_eq!(arr[0]["requests"], 4);
+        assert_eq!(arr[0]["error_rate"], 0.25);
+        assert_eq!(arr[1]["hour_utc"], "2026-09-19T09");
+        assert_eq!(arr[1]["error_rate"], 0.0);
+    }
+
+    #[test]
+    fn insights_empty_db_returns_empty_arrays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telemetry-empty.db");
+        let v = insights(path.to_str().unwrap(), 24).unwrap();
+        assert!(v["slowest_accounts"].as_array().unwrap().is_empty());
+        assert!(v["top_models"].as_array().unwrap().is_empty());
+        assert!(v["worst_hours"].as_array().unwrap().is_empty());
+        assert_eq!(v["window_hours"], 24);
+    }
+
+    #[test]
+    fn insights_window_filters_and_unknown_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telemetry.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let old = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+        let now = Utc::now().to_rfc3339();
+        insert_direct(&conn, "a", &old, "acct-old", "gpt-4o", 200, 100, Some(10));
+        insert_direct(&conn, "b", &now, "", "claude", 500, 200, Some(20));
+
+        let v = insights(path.to_str().unwrap(), 24).unwrap();
+        assert_eq!(v["slowest_accounts"].as_array().unwrap().len(), 1);
+        assert_eq!(v["slowest_accounts"][0]["account"], "unknown");
+        let models = v["top_models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["model"], "claude");
+        assert_eq!(models[0]["error_rate"], 1.0);
     }
 }
