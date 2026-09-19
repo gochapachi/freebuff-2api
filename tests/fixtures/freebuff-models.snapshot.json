@@ -1,0 +1,367 @@
+{
+  "_source": "C:\\Users\\Administrator.DESKTOP-EGNE9ND\\Desktop\\freebuff-2api\\上游本体（源代码等）\\freebuff\\common\\src\\constants\\freebuff-models.ts",
+  "_vended_at": "2026-09-19",
+  "_note": "脚本生成：scripts/extract_upstream_models.mjs + scripts/compose_fixture.mjs；catalog=true=上游合同行（与 src/models.rs MODEL_META_ROWS 做漂移比对），catalog=false=网关自管/registry 行（仅信息）。",
+  "models": [
+    {
+      "id": "anthropic/claude-fable-5",
+      "displayName": "Claude Fable 5",
+      "availability": "always",
+      "premium": true,
+      "multimodal": true,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "reasoningEffort": null,
+      "defaultEffort": "high",
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "crof/kimi-k3-eco",
+      "displayName": "Kimi K3",
+      "availability": "always",
+      "premium": true,
+      "multimodal": false,
+      "efforts": null,
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": true,
+      "catalog": true
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash",
+      "displayName": "DeepSeek V4 Flash 07/31",
+      "availability": "always",
+      "premium": false,
+      "multimodal": false,
+      "efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "reasoningEffort": "high",
+      "defaultEffort": "high",
+      "unavailableFallback": "openai/gpt-5.6-luna",
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash-max",
+      "displayName": null,
+      "availability": "always",
+      "premium": true,
+      "multimodal": false,
+      "efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "deepseek/deepseek-v4-pro",
+      "displayName": "DeepSeek V4 Pro",
+      "availability": "always",
+      "premium": true,
+      "multimodal": false,
+      "efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "reasoningEffort": "high'`. Measured in thinking\r\n * characters on a prompt that needs reasoning (2026-08-2",
+      "defaultEffort": "high",
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "deepseek/deepseek-v4-pro-max",
+      "displayName": null,
+      "availability": "always",
+      "premium": true,
+      "multimodal": false,
+      "efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "google/gemini-3.8-flash",
+      "displayName": "Gemini 3.8 Flash",
+      "availability": "always",
+      "premium": true,
+      "multimodal": true,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "reasoningEffort": null,
+      "defaultEffort": "high",
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "meta/muse-spark-1.2-contributor",
+      "displayName": null,
+      "availability": "always",
+      "premium": true,
+      "multimodal": false,
+      "efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": "deepseek/deepseek-v4-flash",
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "meta/muse-spark-1.3-contributor",
+      "displayName": null,
+      "availability": "always",
+      "premium": true,
+      "multimodal": false,
+      "efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": "deepseek/deepseek-v4-flash",
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "mimo/mimo-v2.5",
+      "displayName": "MiMo 2.5",
+      "availability": "always",
+      "premium": false,
+      "multimodal": true,
+      "efforts": null,
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "minimax/minimax-m3",
+      "displayName": "MiniMax M3",
+      "availability": "always",
+      "premium": true,
+      "multimodal": true,
+      "efforts": null,
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "openai/gpt-5.6-luna",
+      "displayName": "GPT-5.6 Luna",
+      "availability": "always",
+      "premium": true,
+      "multimodal": true,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "reasoningEffort": "FREEBUFF_GPT_5_6_LUNA_REASONING_EFFORT",
+      "defaultEffort": "FREEBUFF_GPT_5_6_LUNA_REASONING_EFFORT",
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "openai/gpt-5.6-luna-es",
+      "displayName": "Codex (test)",
+      "availability": "always",
+      "premium": true,
+      "multimodal": false,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "reasoningEffort": "FREEBUFF_GPT_5_6_LUNA_REASONING_EFFORT",
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "openai/gpt-5.6-luna-max",
+      "displayName": "GPT-5.6 Luna (Max context)",
+      "availability": "always",
+      "premium": true,
+      "multimodal": false,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "reasoningEffort": "FREEBUFF_GPT_5_6_LUNA_REASONING_EFFORT",
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "stealth/ox-alpha",
+      "displayName": "Ox Alpha",
+      "availability": "always",
+      "premium": false,
+      "multimodal": true,
+      "efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "reasoningEffort": "high",
+      "defaultEffort": "high",
+      "unavailableFallback": null,
+      "experimental": true,
+      "catalog": true
+    },
+    {
+      "id": "upstage/solar-pro4",
+      "displayName": "Solar Pro 4",
+      "availability": "always",
+      "premium": true,
+      "multimodal": false,
+      "efforts": null,
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "z-ai/glm-5.2",
+      "displayName": "GLM 5.2",
+      "availability": "always",
+      "premium": true,
+      "multimodal": false,
+      "efforts": null,
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "z-ai/glm-5.3-flash",
+      "displayName": "GLM 5.3 Flash",
+      "availability": "always",
+      "premium": false,
+      "multimodal": true,
+      "efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "reasoningEffort": "max",
+      "defaultEffort": "max",
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": true
+    },
+    {
+      "id": "google/gemini-2.5-flash-lite",
+      "displayName": null,
+      "availability": "always",
+      "premium": false,
+      "multimodal": true,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": false,
+      "note": "上游 free-agents.ts file-picker 当前模型；网关动态 registry 行，无静态 meta → \"未经策略验证\""
+    },
+    {
+      "id": "google/gemini-3.1-flash-lite",
+      "displayName": null,
+      "availability": "always",
+      "premium": false,
+      "multimodal": true,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": false,
+      "note": "free-agents 历史 file-picker/root 行；上游当前 file-picker 已切换 gemini-2.5-flash-lite"
+    },
+    {
+      "id": "google/gemini-3.5-flash-lite",
+      "displayName": null,
+      "availability": "always",
+      "premium": false,
+      "multimodal": true,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "reasoningEffort": null,
+      "defaultEffort": null,
+      "unavailableFallback": null,
+      "experimental": false,
+      "catalog": false,
+      "note": "网关 root 免费行；上游目录暂无同 id"
+    }
+  ]
+}

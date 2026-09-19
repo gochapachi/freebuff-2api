@@ -91,3 +91,53 @@ fn model_available_defaults_true_for_unknown() {
         "上游动态新增不应被误伤"
     );
 }
+
+// —— v0.10 T1.2：目录/契约对齐 ——
+
+#[test]
+fn mimo_in_catalog_and_meta() {
+    let reg = ModelRegistry::new();
+    let m = reg.meta_for("mimo/mimo-v2.5").expect("mimo 应有元数据");
+    assert!(m.available);
+    assert!(!m.premium);
+    assert!(m.multimodal);
+    assert!(m.efforts.is_none());
+    assert_eq!(m.availability, "always");
+}
+
+#[test]
+fn fixture_catalog_rows_covered_by_meta() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/freebuff-models.snapshot.json"))
+            .expect("fixture 可解析");
+    let reg = ModelRegistry::new();
+    let models = fixture["models"].as_array().expect("models 数组");
+    let mut checked = 0usize;
+    for row in models {
+        if row["catalog"].as_bool().unwrap_or(false) {
+            let id = row["id"].as_str().unwrap();
+            let meta = reg
+                .meta_for(id)
+                .unwrap_or_else(|| panic!("catalog 行缺 meta: {id}"));
+            assert_eq!(
+                meta.availability,
+                row["availability"].as_str().unwrap(),
+                "availability 漂移: {id}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 18,
+        "catalog 行数应 ≥18（含 mimo），实际 {checked}"
+    );
+}
+
+#[test]
+fn vendored_snapshot_refresh_keeps_zero_drift() {
+    let reg = ModelRegistry::new();
+    let snap = freebuff2api::models::load_local_snapshot().expect("内置快照");
+    let (added, updated) = reg.refresh_strategy_from_snapshot(&snap).unwrap();
+    assert_eq!(added, 0, "快照不应新增静态表外 catalog 行");
+    assert_eq!(updated, 0, "快照与静态表应零漂移");
+}

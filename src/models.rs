@@ -5,6 +5,7 @@
 //! - 默认免费模型 z-ai/glm-5.3-flash
 //! - 每账号 rateLimitsByModel 决定实际可用
 
+use chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -34,6 +35,7 @@ pub const HARDCODED_MODELS: &[&str] = &[
     "stealth/ox-alpha",
     "crof/kimi-k3-eco",
     "z-ai/glm-5.2",
+    "mimo/mimo-v2.5",
 ];
 
 /// 子代理 agent 映射（run 层级）
@@ -54,9 +56,22 @@ pub struct ModelInfo {
     pub premium: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ModelRegistry {
     inner: Arc<RwLock<RegistryInner>>,
+    /// 运行时策略覆盖（std Mutex 短临界区；供同步 meta_for/路由消费，避免 async 阻塞）
+    overrides: std::sync::Mutex<HashMap<String, MetaOverride>>,
+}
+
+impl Clone for ModelRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            overrides: std::sync::Mutex::new(
+                self.overrides.lock().map(|g| g.clone()).unwrap_or_default(),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -88,6 +103,10 @@ pub struct ModelMeta {
     pub efforts: Option<Vec<String>>,
     /// 不可用时的回落模型
     pub fallback: Option<String>,
+    /// 上游 availability 策略（always / deployment_hours / off_peak_only）
+    pub availability: String,
+    /// 不可用时的预计恢复时刻（ISO8601 UTC；deployment_hours/未知不编造 → None）
+    pub available_at: Option<String>,
 }
 
 struct MetaRow {
@@ -96,6 +115,7 @@ struct MetaRow {
     premium: bool,
     multimodal: bool,
     available: bool,
+    availability: &'static str,
     efforts: Option<&'static [&'static str]>,
     fallback: Option<&'static str>,
 }
@@ -113,6 +133,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: false,
         multimodal: true,
         available: true,
+        availability: "always",
         efforts: Some(EFFORTS_GLM),
         fallback: None,
     },
@@ -122,6 +143,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: false,
         multimodal: true,
         available: true,
+        availability: "always",
         efforts: Some(EFFORTS_FULL),
         fallback: None,
     },
@@ -131,15 +153,17 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: false,
         multimodal: true,
         available: true,
+        availability: "always",
         efforts: Some(EFFORTS_FULL),
         fallback: None,
     },
     MetaRow {
         id: "deepseek/deepseek-v4-flash",
         agent: ROOT_AGENT_ID,
-        premium: true,
+        premium: false,
         multimodal: false,
         available: true,
+        availability: "always",
         efforts: Some(EFFORTS_GLM),
         fallback: Some("openai/gpt-5.6-luna"),
     },
@@ -149,6 +173,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: true,
         multimodal: false,
         available: true,
+        availability: "always",
         efforts: Some(EFFORTS_GLM),
         fallback: None,
     },
@@ -158,6 +183,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: true,
         multimodal: false,
         available: true,
+        availability: "always",
         efforts: Some(EFFORTS_GLM),
         fallback: None,
     },
@@ -167,6 +193,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: true,
         multimodal: true,
         available: true,
+        availability: "always",
         efforts: Some(EFFORTS_FULL),
         fallback: None,
     },
@@ -176,6 +203,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: true,
         multimodal: false,
         available: true,
+        availability: "always",
         efforts: Some(EFFORTS_FULL),
         fallback: None,
     },
@@ -185,6 +213,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: true,
         multimodal: false,
         available: true,
+        availability: "always",
         efforts: Some(EFFORTS_FULL),
         fallback: None,
     },
@@ -194,6 +223,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: true,
         multimodal: false,
         available: true,
+        availability: "always",
         efforts: None,
         fallback: None,
     },
@@ -203,6 +233,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: true,
         multimodal: false,
         available: true,
+        availability: "always",
         efforts: Some(EFFORTS_MUSE),
         fallback: Some("deepseek/deepseek-v4-flash"),
     },
@@ -210,17 +241,19 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         id: "anthropic/claude-fable-5",
         agent: ROOT_AGENT_ID,
         premium: true,
-        multimodal: false,
+        multimodal: true,
         available: true,
+        availability: "always",
         efforts: Some(EFFORTS_FULL),
         fallback: None,
     },
     MetaRow {
         id: "crof/kimi-k3-eco",
         agent: ROOT_AGENT_ID,
-        premium: false,
+        premium: true,
         multimodal: false,
         available: true,
+        availability: "always",
         efforts: None,
         fallback: None,
     },
@@ -231,6 +264,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: true,
         multimodal: true,
         available: false,
+        availability: "always",
         efforts: Some(EFFORTS_FULL),
         fallback: Some("google/gemini-3.1-flash-lite"),
     },
@@ -240,6 +274,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: true,
         multimodal: false,
         available: false,
+        availability: "always",
         efforts: Some(EFFORTS_GLM),
         fallback: Some("z-ai/glm-5.3-flash"),
     },
@@ -249,6 +284,7 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: true,
         multimodal: true,
         available: false,
+        availability: "always",
         efforts: None,
         fallback: Some("z-ai/glm-5.3-flash"),
     },
@@ -258,15 +294,17 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         premium: true,
         multimodal: false,
         available: false,
+        availability: "always",
         efforts: Some(EFFORTS_MUSE),
         fallback: Some("deepseek/deepseek-v4-flash"),
     },
     MetaRow {
         id: "stealth/ox-alpha",
         agent: ROOT_AGENT_ID,
-        premium: true,
-        multimodal: false,
+        premium: false,
+        multimodal: true,
         available: false,
+        availability: "always",
         efforts: Some(EFFORTS_GLM),
         fallback: Some("z-ai/glm-5.3-flash"),
     },
@@ -274,23 +312,210 @@ const MODEL_META_ROWS: &[MetaRow] = &[
         id: "z-ai/glm-5.2",
         agent: ROOT_AGENT_ID,
         premium: true,
-        multimodal: true,
+        multimodal: false,
         available: false,
+        availability: "always",
         efforts: None,
         fallback: Some("z-ai/glm-5.3-flash"),
     },
+    MetaRow {
+        id: "mimo/mimo-v2.5",
+        agent: ROOT_AGENT_ID,
+        premium: false,
+        multimodal: true,
+        available: true,
+        availability: "always",
+        efforts: None,
+        fallback: None,
+    },
 ];
 
-fn meta_row_to_meta(r: &MetaRow) -> ModelMeta {
-    ModelMeta {
-        id: r.id.to_string(),
-        agent: r.agent.to_string(),
+/// DeepSeek 高价窗（上游 freebuff-models.ts 注释）：00:00–10:00 UTC，半开区间 [0,10)
+pub const DEEPSEEK_EXPENSIVE_WINDOW_UTC: (u32, u32) = (0, 10);
+
+/// 北京时间（UTC+8）周末时 DeepSeek 高价窗不生效（上游注释语义）
+fn is_beijing_weekend(now: DateTime<Utc>) -> bool {
+    let bj = now + chrono::Duration::hours(8);
+    matches!(bj.weekday(), Weekday::Sat | Weekday::Sun)
+}
+
+/// 当前是否处于 DeepSeek 高价窗（UTC；北京时间周末豁免）
+pub fn is_deepseek_expensive_window(now: DateTime<Utc>) -> bool {
+    if is_beijing_weekend(now) {
+        return false;
+    }
+    let h = now.hour();
+    h >= DEEPSEEK_EXPENSIVE_WINDOW_UTC.0 && h < DEEPSEEK_EXPENSIVE_WINDOW_UTC.1
+}
+
+/// 高价窗结束时刻（同 UTC 日 10:00:00，窗口不跨午夜——与上游注释一致）
+pub fn deepseek_expensive_window_ends_at(now: DateTime<Utc>) -> DateTime<Utc> {
+    now.date_naive()
+        .and_hms_opt(10, 0, 0)
+        .map(|d| d.and_utc())
+        .unwrap_or(now)
+}
+
+/// availability 策略 → 指定时刻窗口内是否可用
+///
+/// - always → true
+/// - off_peak_only → !is_deepseek_expensive_window
+/// - deployment_hours → true（上游运维窗口，网关无法精确计算，不据此拒绝、
+///   也不编造 availableAt，与上游 freebuffModelUnavailableAt 行为对齐）
+/// - 其它 → false（未知策略保守拒绝）
+pub fn availability_now(availability: &str, now: DateTime<Utc>) -> bool {
+    match availability {
+        "always" => true,
+        "off_peak_only" => !is_deepseek_expensive_window(now),
+        "deployment_hours" => true,
+        _ => false,
+    }
+}
+
+/// 运行时策略覆盖（上游快照同步所得；仅覆盖显式提供的字段，保留既有值）
+#[derive(Debug, Clone, Default)]
+struct MetaOverride {
+    availability: Option<String>,
+    premium: Option<bool>,
+    multimodal: Option<bool>,
+    /// Some(Some(阶梯)) / Some(None)=明确无阶梯 / None=未声明（保留）
+    efforts: Option<Option<Vec<String>>>,
+    fallback: Option<Option<String>>,
+}
+
+/// 上游快照单行（camelCase 对齐 fixture）
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotModelMeta {
+    id: String,
+    #[serde(default)]
+    availability: Option<String>,
+    #[serde(default)]
+    premium: Option<bool>,
+    #[serde(default)]
+    multimodal: Option<bool>,
+    #[serde(default)]
+    efforts: Option<Option<Vec<String>>>,
+    #[serde(default)]
+    unavailable_fallback: Option<Option<String>>,
+    #[serde(default)]
+    #[allow(dead_code)] // 快照实验性标记，策略层暂不消费
+    experimental: Option<bool>,
+    /// false = 网关自管/registry 行（不进策略覆盖）
+    #[serde(default)]
+    catalog: bool,
+}
+
+/// 上游快照文件（_source/_vended_at 为元信息）
+#[derive(Debug, serde::Deserialize)]
+struct SnapshotFile {
+    #[serde(rename = "_source")]
+    #[allow(dead_code)]
+    source: String,
+    #[serde(rename = "_vended_at")]
+    #[allow(dead_code)]
+    vended_at: String,
+    models: Vec<SnapshotModelMeta>,
+}
+
+fn override_from_snapshot(r: &SnapshotModelMeta) -> MetaOverride {
+    MetaOverride {
+        availability: r.availability.clone(),
         premium: r.premium,
         multimodal: r.multimodal,
-        available: r.available,
-        efforts: r.efforts.map(|e| e.iter().map(|s| s.to_string()).collect()),
-        fallback: r.fallback.map(|s| s.to_string()),
+        efforts: r.efforts.clone(),
+        fallback: r.unavailable_fallback.clone(),
     }
+}
+
+/// 合并两层覆盖（patch 的 Some 字段覆盖 base）
+fn merge_override(base: &MetaOverride, patch: &MetaOverride) -> MetaOverride {
+    MetaOverride {
+        availability: patch
+            .availability
+            .clone()
+            .or_else(|| base.availability.clone()),
+        premium: patch.premium.or(base.premium),
+        multimodal: patch.multimodal.or(base.multimodal),
+        efforts: patch.efforts.clone().or_else(|| base.efforts.clone()),
+        fallback: patch.fallback.clone().or_else(|| base.fallback.clone()),
+    }
+}
+
+/// 静态行 + 运行时覆盖 + 指定时刻 → 最终元数据
+fn merge_into_meta(
+    id: &str,
+    static_row: Option<&MetaRow>,
+    over: Option<&MetaOverride>,
+    now: DateTime<Utc>,
+) -> Option<ModelMeta> {
+    let s = static_row;
+    let o = over;
+    let availability = o
+        .and_then(|x| x.availability.clone())
+        .or_else(|| s.map(|r| r.availability.to_string()))
+        .unwrap_or_else(|| "always".to_string());
+    let premium = o
+        .and_then(|x| x.premium)
+        .or_else(|| s.map(|r| r.premium))
+        .unwrap_or(false);
+    let multimodal = o
+        .and_then(|x| x.multimodal)
+        .or_else(|| s.map(|r| r.multimodal))
+        .unwrap_or(false);
+    let efforts: Option<Vec<String>> = match o.and_then(|x| x.efforts.clone()) {
+        Some(inner) => inner,
+        None => s
+            .and_then(|r| r.efforts)
+            .map(|e| e.iter().map(|x| x.to_string()).collect()),
+    };
+    let fallback: Option<String> = match o.and_then(|x| x.fallback.clone()) {
+        Some(inner) => inner,
+        None => s.and_then(|r| r.fallback).map(|x| x.to_string()),
+    };
+    let static_available = s.map(|r| r.available).unwrap_or(true);
+    let window_ok = availability_now(&availability, now);
+    let available = static_available && window_ok;
+    let available_at = if !available && availability == "off_peak_only" {
+        Some(deepseek_expensive_window_ends_at(now).to_rfc3339())
+    } else {
+        None
+    };
+    Some(ModelMeta {
+        id: id.to_string(),
+        agent: s
+            .map(|r| r.agent.to_string())
+            .unwrap_or_else(|| ROOT_AGENT_ID.to_string()),
+        premium,
+        multimodal,
+        available,
+        efforts,
+        fallback,
+        availability,
+        available_at,
+    })
+}
+
+/// 策略字段相等（忽略 available/available_at 时间派生值，用于幂等判定）
+fn strategy_eq(a: &ModelMeta, b: &ModelMeta) -> bool {
+    a.availability == b.availability
+        && a.premium == b.premium
+        && a.multimodal == b.multimodal
+        && a.efforts == b.efforts
+        && a.fallback == b.fallback
+}
+
+/// 读取本地快照：FREE_MODELS_SNAPSHOT 环境变量 > cwd/tests/fixtures > 编译期内嵌
+pub fn load_local_snapshot() -> Option<String> {
+    if let Ok(p) = std::env::var("FREE_MODELS_SNAPSHOT") {
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            return Some(s);
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string("tests/fixtures/freebuff-models.snapshot.json") {
+        return Some(s);
+    }
+    Some(include_str!("../tests/fixtures/freebuff-models.snapshot.json").to_string())
 }
 
 impl ModelRegistry {
@@ -298,6 +523,7 @@ impl ModelRegistry {
         let inner = RegistryInner::default();
         Self {
             inner: Arc::new(RwLock::new(inner)),
+            overrides: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -401,17 +627,43 @@ impl ModelRegistry {
         HARDCODED_MODELS.iter().map(|s| s.to_string()).collect()
     }
 
-    /// 同步读模型元数据快照（静态权威表，不依赖 RwLock；供 /v1/models 消费）
+    /// 同步读模型元数据快照（时间感知；/v1/models 消费）
     pub fn meta_snapshot(&self) -> Vec<ModelMeta> {
-        MODEL_META_ROWS.iter().map(meta_row_to_meta).collect()
+        self.meta_snapshot_at(Utc::now())
     }
 
-    /// 同步读单个模型元数据（未知模型返回 None）
+    /// 指定时刻的元数据快照（供测试与窗口断言）
+    pub fn meta_snapshot_at(&self, now: DateTime<Utc>) -> Vec<ModelMeta> {
+        let over = self.overrides.lock().map(|g| g.clone()).unwrap_or_default();
+        let mut out: Vec<ModelMeta> = Vec::with_capacity(MODEL_META_ROWS.len() + 2);
+        for r in MODEL_META_ROWS {
+            if let Some(m) = merge_into_meta(r.id, Some(r), over.get(r.id), now) {
+                out.push(m);
+            }
+        }
+        for (id, o) in &over {
+            if !MODEL_META_ROWS.iter().any(|r| r.id == id) {
+                if let Some(m) = merge_into_meta(id, None, Some(o), now) {
+                    out.push(m);
+                }
+            }
+        }
+        out
+    }
+
+    /// 同步读单个模型元数据（时间感知；未知模型返回 None）
     pub fn meta_for(&self, id: &str) -> Option<ModelMeta> {
-        MODEL_META_ROWS
-            .iter()
-            .find(|r| r.id == id)
-            .map(meta_row_to_meta)
+        self.meta_for_at(id, Utc::now())
+    }
+
+    /// 指定时刻的单个模型元数据（供测试与窗口断言）
+    pub fn meta_for_at(&self, id: &str, now: DateTime<Utc>) -> Option<ModelMeta> {
+        let s = MODEL_META_ROWS.iter().find(|r| r.id == id);
+        let over = self.overrides.lock().ok().and_then(|g| g.get(id).cloned());
+        if s.is_none() && over.is_none() {
+            return None;
+        }
+        merge_into_meta(id, s, over.as_ref(), now)
     }
 
     /// 同步读模型 efforts 阶梯（'static 切片，供同步路由场景使用）
@@ -422,9 +674,65 @@ impl ModelRegistry {
             .and_then(|r| r.efforts)
     }
 
-    /// 模型是否可免费使用（静态权威表；未知模型默认可用，不误伤上游动态新增）
+    /// 模型当前是否可用（静态暂停 && 时间窗；未知模型默认可用，不误伤上游动态新增）
     pub fn model_available(&self, id: &str) -> bool {
-        self.meta_for(id).map(|m| m.available).unwrap_or(true)
+        self.model_available_at(id, Utc::now())
+    }
+
+    /// 指定时刻的可用性（供路由时间感知）
+    pub fn model_available_at(&self, id: &str, now: DateTime<Utc>) -> bool {
+        self.meta_for_at(id, now)
+            .map(|m| m.available)
+            .unwrap_or(true)
+    }
+
+    /// 是否拥有策略元数据（静态表或上游快照覆盖）；false = "未经策略验证"
+    pub fn is_known(&self, id: &str) -> bool {
+        MODEL_META_ROWS.iter().any(|r| r.id == id)
+            || self
+                .overrides
+                .lock()
+                .map(|g| g.contains_key(id))
+                .unwrap_or(false)
+    }
+
+    /// 解析上游快照 JSON 并合并策略覆盖（新增模型 / 更新 availability/efforts/fallback；不删除硬编码条目）
+    ///
+    /// 返回 (added, updated)；幂等：再次应用相同快照返回 (0, 0)。
+    /// 失败（坏 JSON）返回 Err，由调用方静默降级到静态底座并 warn。
+    pub fn refresh_strategy_from_snapshot(&self, json: &str) -> anyhow::Result<(usize, usize)> {
+        let file: SnapshotFile =
+            serde_json::from_str(json).map_err(|e| anyhow::anyhow!("上游模型快照解析失败: {e}"))?;
+        let now = Utc::now();
+        let mut guard = self
+            .overrides
+            .lock()
+            .map_err(|_| anyhow::anyhow!("策略覆盖表锁污染"))?;
+        let mut added = 0usize;
+        let mut updated = 0usize;
+        for row in &file.models {
+            if !row.catalog {
+                continue;
+            }
+            let static_row = MODEL_META_ROWS.iter().find(|r| r.id == row.id);
+            let prev_override = guard.get(&row.id).cloned();
+            let prev = merge_into_meta(&row.id, static_row, prev_override.as_ref(), now);
+            let patch = override_from_snapshot(row);
+            let merged = match &prev_override {
+                Some(b) => merge_override(b, &patch),
+                None => patch,
+            };
+            let next = merge_into_meta(&row.id, static_row, Some(&merged), now);
+            if static_row.is_none() && prev_override.is_none() {
+                added += 1;
+            } else if let (Some(a), Some(b)) = (prev, next) {
+                if !strategy_eq(&a, &b) {
+                    updated += 1;
+                }
+            }
+            guard.insert(row.id.clone(), merged);
+        }
+        Ok((added, updated))
     }
 
     pub async fn snapshot(&self) -> ModelRegistrySnapshot {
@@ -560,5 +868,173 @@ mod tests {
         ] {
             assert!(first.get(k).is_some(), "缺少字段 {k}");
         }
+    }
+
+    #[test]
+    fn availability_window_inside_weekday_false() {
+        // 2026-09-16 周三；03:00 UTC 处于 [00:00,10:00) 高价窗内
+        let t = DateTime::parse_from_rfc3339("2026-09-16T03:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(is_deepseek_expensive_window(t));
+        assert!(!availability_now("off_peak_only", t));
+        let m = ModelRegistry::new().meta_for_at("z-ai/glm-5.3-flash", t);
+        assert!(m.is_some());
+    }
+
+    #[test]
+    fn availability_window_outside_weekday_true() {
+        let t = DateTime::parse_from_rfc3339("2026-09-16T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!is_deepseek_expensive_window(t));
+        assert!(availability_now("off_peak_only", t));
+    }
+
+    #[test]
+    fn availability_window_boundary_midnight_in_window() {
+        // 00:00 属于高价窗（半开 [00:00, 10:00)）
+        let t = DateTime::parse_from_rfc3339("2026-09-16T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(is_deepseek_expensive_window(t));
+    }
+
+    #[test]
+    fn availability_window_boundary_10_00_exclusive() {
+        // 10:00 不在高价窗（半开）
+        let t = DateTime::parse_from_rfc3339("2026-09-16T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!is_deepseek_expensive_window(t));
+    }
+
+    #[test]
+    fn availability_window_beijing_weekend_exempt() {
+        // 2026-09-19 是周六；03:00 UTC = 北京 11:00 周六 → 高价窗豁免
+        let t = DateTime::parse_from_rfc3339("2026-09-19T03:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!is_deepseek_expensive_window(t));
+        assert!(availability_now("off_peak_only", t));
+    }
+
+    #[test]
+    fn availability_deployment_hours_true_unknown_false() {
+        let t = DateTime::parse_from_rfc3339("2026-09-16T03:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(
+            availability_now("deployment_hours", t),
+            "deployment_hours 不据此拒绝"
+        );
+        assert!(!availability_now("mystery_policy", t), "未知策略保守拒绝");
+    }
+
+    #[test]
+    fn off_peak_override_drives_available_and_available_at() {
+        // 通过快照把 glm-5.3 的 availability 覆盖为 off_peak_only，验证窗口/恢复时刻
+        let reg = ModelRegistry::new();
+        let snap = r#"{"_source":"t","_vended_at":"2026-09-19","models":[{"id":"z-ai/glm-5.3-flash","availability":"off_peak_only","catalog":true}]}"#;
+        let (added, updated) = reg.refresh_strategy_from_snapshot(snap).unwrap();
+        assert_eq!((added, updated), (0, 1), "静态行更新 = 1");
+        let in_win = DateTime::parse_from_rfc3339("2026-09-16T03:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let out_win = DateTime::parse_from_rfc3339("2026-09-16T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let m_in = reg.meta_for_at("z-ai/glm-5.3-flash", in_win).unwrap();
+        assert!(!m_in.available, "窗口内不可用");
+        let aa = m_in
+            .available_at
+            .as_deref()
+            .expect("off_peak 窗口内应给 availableAt");
+        assert!(
+            DateTime::parse_from_rfc3339(aa).is_ok(),
+            "availableAt 可解析: {aa}"
+        );
+        let m_out = reg.meta_for_at("z-ai/glm-5.3-flash", out_win).unwrap();
+        assert!(m_out.available, "窗口外可用");
+        assert!(m_out.available_at.is_none(), "窗口外无 availableAt");
+    }
+
+    #[test]
+    fn refresh_snapshot_merges_new_and_is_idempotent() {
+        let reg = ModelRegistry::new();
+        let snap = r#"{"_source":"t","_vended_at":"2026-09-19","models":[
+            {"id":"fake/new-model-a","availability":"always","premium":true,"multimodal":false,"catalog":true},
+            {"id":"z-ai/glm-5.3-flash","efforts":["low","high","max"],"catalog":true}
+        ]}"#;
+        let (a1, u1) = reg.refresh_strategy_from_snapshot(snap).unwrap();
+        assert_eq!((a1, u1), (1, 0), "新增 1、静态无变化");
+        assert!(
+            reg.meta_for("fake/new-model-a").is_some(),
+            "新模型进入 meta"
+        );
+        assert!(reg.is_known("fake/new-model-a"));
+        let (a2, u2) = reg.refresh_strategy_from_snapshot(snap).unwrap();
+        assert_eq!((a2, u2), (0, 0), "再次应用幂等");
+    }
+
+    #[test]
+    fn refresh_snapshot_bad_json_returns_err() {
+        let reg = ModelRegistry::new();
+        assert!(reg.refresh_strategy_from_snapshot("{ not json").is_err());
+    }
+
+    #[test]
+    fn refresh_snapshot_preserves_missing_fields() {
+        // 快照行缺少 unavailableFallback 时不得覆盖既有 fallback
+        let reg = ModelRegistry::new();
+        let before = reg.meta_for("deepseek/deepseek-v4-flash").unwrap();
+        assert_eq!(before.fallback.as_deref(), Some("openai/gpt-5.6-luna"));
+        let snap = r#"{"_source":"t","_vended_at":"2026-09-19","models":[{"id":"deepseek/deepseek-v4-flash","availability":"always","catalog":true}]}"#;
+        reg.refresh_strategy_from_snapshot(snap).unwrap();
+        let after = reg.meta_for("deepseek/deepseek-v4-flash").unwrap();
+        assert_eq!(
+            after.fallback.as_deref(),
+            Some("openai/gpt-5.6-luna"),
+            "缺字段不得清空 fallback"
+        );
+    }
+
+    #[test]
+    fn mimo_meta_is_present_and_correct() {
+        let reg = ModelRegistry::new();
+        let m = reg.meta_for("mimo/mimo-v2.5").expect("mimo 应有元数据");
+        assert!(m.available);
+        assert!(!m.premium);
+        assert!(m.multimodal);
+        assert!(m.efforts.is_none(), "mimo 无 efforts 阶梯");
+        assert!(reg.is_known("mimo/mimo-v2.5"));
+    }
+
+    #[test]
+    fn is_known_marks_dynamic_models_unverified() {
+        let reg = ModelRegistry::new();
+        assert!(reg.is_known("z-ai/glm-5.3-flash"));
+        // 上游 free-agents 动态新增但无静态 meta → 未经策略验证
+        assert!(!reg.is_known("google/gemini-2.5-flash-lite"));
+    }
+
+    #[test]
+    fn vendored_snapshot_applies_cleanly() {
+        // 内置/本地快照与静态表对齐 → (0,0) 幂等自检
+        let snap = load_local_snapshot().expect("内置快照存在");
+        let reg = ModelRegistry::new();
+        let (added, updated) = reg.refresh_strategy_from_snapshot(&snap).unwrap();
+        assert_eq!(added, 0, "快照不应新增静态表外 catalog 行");
+        assert_eq!(updated, 0, "对齐的快照不应产生更新");
+    }
+
+    #[test]
+    fn meta_snapshot_includes_availability_fields() {
+        let reg = ModelRegistry::new();
+        let snap = reg.meta_snapshot();
+        assert!(snap.len() >= 20, "含 mimo 至少 20 条");
+        let v = serde_json::to_value(&snap[0]).unwrap();
+        assert!(v.get("availability").is_some(), "meta 含 availability");
+        assert!(v.get("available_at").is_some(), "meta 含 available_at");
     }
 }

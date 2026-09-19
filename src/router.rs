@@ -51,14 +51,20 @@ impl ModelRouter {
         Self { config, registry }
     }
 
-    /// 解析请求模型 → 实际可用模型（含降级链）
+    /// 解析请求模型 → 实际可用模型（含降级链；时间感知）
     pub async fn resolve(&self, requested: &str) -> String {
-        if self.registry.has_model(requested).await {
+        self.resolve_at(requested, chrono::Utc::now()).await
+    }
+
+    /// 指定时刻解析：请求模型当时可用才直接选用；否则降级链取第一条当时可用
+    pub async fn resolve_at(&self, requested: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+        if self.registry.has_model(requested).await
+            && self.registry.model_available_at(requested, now)
+        {
             return requested.to_string();
         }
-        // 请求模型不可用 → 走降级链第一条可用
         for m in &self.config.fallback_chain {
-            if self.registry.has_model(m).await {
+            if self.registry.has_model(m).await && self.registry.model_available_at(m, now) {
                 return m.clone();
             }
         }
@@ -119,9 +125,18 @@ impl ModelRouter {
         self.registry.model_available(model)
     }
 
-    /// 模型不可用且有回落时返回回落模型；可用 / 未知模型 → None
+    /// 模型不可用且有回落时返回回落模型；可用 / 未知模型 → None（时间感知）
     pub fn resolve_available(&self, model: &str) -> Option<String> {
-        let meta = self.registry.meta_for(model)?;
+        self.resolve_available_at(model, chrono::Utc::now())
+    }
+
+    /// 指定时刻：不可用且有回落 → 回落模型；可用 / 未知 → None
+    pub fn resolve_available_at(
+        &self,
+        model: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<String> {
+        let meta = self.registry.meta_for_at(model, now)?;
         if meta.available {
             return None;
         }
@@ -130,15 +145,42 @@ impl ModelRouter {
 
     /// 不可用模型的可读原因（面板展示用）；可用 / 未知模型 → None
     pub fn unavailable_reason(&self, model: &str) -> Option<String> {
-        let meta = self.registry.meta_for(model)?;
+        self.unavailable_reason_at(model, chrono::Utc::now())
+    }
+
+    /// 指定时刻的可读原因（含 availableAt 文本）
+    pub fn unavailable_reason_at(
+        &self,
+        model: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<String> {
+        self.unavailable_detail_at(model, now)
+            .map(|(reason, _)| reason)
+    }
+
+    /// 指定时刻：不可用原因 + 预计恢复时刻（off_peak_only 窗口内 → Some(ISO)，其余 None）
+    pub fn unavailable_detail_at(
+        &self,
+        model: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<(String, Option<String>)> {
+        let meta = self.registry.meta_for_at(model, now)?;
         if meta.available {
             return None;
         }
-        let mut msg = format!("模型 {model} 已被上游暂停/下架（免费模式不再提供）");
+        let paused = meta.availability != "off_peak_only";
+        let mut msg = if paused {
+            format!("模型 {model} 已被上游暂停/下架（免费模式不再提供）")
+        } else {
+            format!("模型 {model} 当前不在可用窗口（上游 DeepSeek 高价窗 00:00–10:00 UTC）")
+        };
         if let Some(fb) = &meta.fallback {
             msg.push_str(&format!("；建议改用 {fb}"));
         }
-        Some(msg)
+        if let Some(aa) = &meta.available_at {
+            msg.push_str(&format!("；预计恢复 {aa}（availableAt）"));
+        }
+        Some((msg, meta.available_at))
     }
 
     /// 校正 effort：不支持或超范围时降级到最近支持值
@@ -292,5 +334,74 @@ mod tests {
         let e = "🎉".repeat(300);
         let out2 = compress_tool_result(&e, 500);
         assert!(out2.contains("已压缩"));
+    }
+
+    #[test]
+    fn resolve_at_time_aware_fallback() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let reg = Arc::new(ModelRegistry::new());
+            reg.init().await;
+            let r = ModelRouter::new(reg.clone(), RouterConfig::default());
+            // 暂停模型（gemini-3.8）→ 降级链第一条当时可用（glm-5.3）
+            assert_eq!(
+                r.resolve("google/gemini-3.8-flash").await,
+                "z-ai/glm-5.3-flash"
+            );
+            // 可用模型原样返回
+            assert_eq!(r.resolve("z-ai/glm-5.3-flash").await, "z-ai/glm-5.3-flash");
+            // 未知模型 → 默认
+            assert_eq!(
+                r.resolve("no/such-model").await,
+                crate::models::DEFAULT_MODEL
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_available_at_window_fallback() {
+        let reg = ModelRegistry::new();
+        // 快照覆盖：deepseek-v4-flash → off_peak_only（fallback 保留 gpt-5.6-luna）
+        let snap = r#"{"_source":"t","_vended_at":"2026-09-19","models":[{"id":"deepseek/deepseek-v4-flash","availability":"off_peak_only","catalog":true}]}"#;
+        reg.refresh_strategy_from_snapshot(snap).unwrap();
+        let r = ModelRouter::new(Arc::new(reg), RouterConfig::default());
+        let in_win = chrono::DateTime::parse_from_rfc3339("2026-09-16T03:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let out_win = chrono::DateTime::parse_from_rfc3339("2026-09-16T15:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            r.resolve_available_at("deepseek/deepseek-v4-flash", in_win)
+                .as_deref(),
+            Some("openai/gpt-5.6-luna")
+        );
+        assert_eq!(
+            r.resolve_available_at("deepseek/deepseek-v4-flash", out_win),
+            None
+        );
+        // 未知模型不抖动
+        assert_eq!(r.resolve_available("no/such-model"), None);
+    }
+
+    #[test]
+    fn unavailable_reason_at_has_parseable_available_at() {
+        let reg = ModelRegistry::new();
+        let snap = r#"{"_source":"t","_vended_at":"2026-09-19","models":[{"id":"deepseek/deepseek-v4-flash","availability":"off_peak_only","catalog":true}]}"#;
+        reg.refresh_strategy_from_snapshot(snap).unwrap();
+        let r = ModelRouter::new(Arc::new(reg), RouterConfig::default());
+        let in_win = chrono::DateTime::parse_from_rfc3339("2026-09-16T03:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let (reason, aa) = r
+            .unavailable_detail_at("deepseek/deepseek-v4-flash", in_win)
+            .expect("窗口内应给原因");
+        assert!(reason.contains("窗口"), "窗口文案: {reason}");
+        let iso = aa.expect("窗口内应有 availableAt");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&iso).is_ok(),
+            "ISO 可解析"
+        );
+        assert!(reason.contains("availableAt"));
     }
 }
