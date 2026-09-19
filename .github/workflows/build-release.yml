@@ -182,8 +182,11 @@ jobs:
           mkdir -p data-e2e
           ./target/release/freebuff2api.exe --config config.e2e.json &
           GW_PID=$!
+          # 审计 L6：无论脚本成败都清理网关；健康轮询超时显式失败（不静默白等）
+          trap 'taskkill //F //IM freebuff2api.exe >/dev/null 2>&1 || kill $GW_PID >/dev/null 2>&1 || true' EXIT
           for i in $(seq 1 90); do
             if curl -sf http://127.0.0.1:47980/healthz >/dev/null 2>&1; then break; fi
+            if [ "$i" = "90" ]; then echo "::error::gateway failed to start within 90s"; exit 1; fi
             sleep 1
           done
           # 预置假 web-cookie（仅本地池，触发 health 合并路径；无上游网络调用）

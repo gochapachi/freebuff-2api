@@ -129,20 +129,20 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
   <div class="cards" id="cards"></div>
   <div id="cost-line" style="font-size:13px;color:var(--muted);margin:-8px 0 16px 2px"></div>
   <nav role="tablist" aria-label="面板导航">
-    <button role="tab" id="tab-btn-overview" data-tab="overview" class="active" aria-selected="true" aria-controls="tab-overview" onclick="showTab('overview')">总览</button>
-    <button role="tab" id="tab-btn-play" data-tab="play" aria-selected="false" aria-controls="tab-play" onclick="showTab('play')">测试台</button>
-    <button role="tab" id="tab-btn-account" data-tab="account" aria-selected="false" aria-controls="tab-account" onclick="showTab('account')">账号</button>
-    <button role="tab" id="tab-btn-skills" data-tab="skills" aria-selected="false" aria-controls="tab-skills" onclick="showTab('skills')">技能</button>
-    <button role="tab" id="tab-btn-memory" data-tab="memory" aria-selected="false" aria-controls="tab-memory" onclick="showTab('memory')">记忆</button>
-    <button role="tab" id="tab-btn-logs" data-tab="logs" aria-selected="false" aria-controls="tab-logs" onclick="showTab('logs')">实时日志</button>
-    <button role="tab" id="tab-btn-teach" data-tab="teach" aria-selected="false" aria-controls="tab-teach" onclick="showTab('teach')">原理</button>
-    <button role="tab" id="tab-btn-doctor" data-tab="doctor" aria-selected="false" aria-controls="tab-doctor" onclick="showTab('doctor')">系统体检</button>
-    <button role="tab" id="tab-btn-guide" data-tab="guide" aria-selected="false" aria-controls="tab-guide" onclick="showTab('guide')">接入指南</button>
-    <button role="tab" id="tab-btn-settings" data-tab="settings" aria-selected="false" aria-controls="tab-settings" onclick="showTab('settings')">设置</button>
-    <button role="tab" id="tab-btn-about" data-tab="about" aria-selected="false" aria-controls="tab-about" onclick="showTab('about')">关于</button>
+    <button role="tab" id="tab-btn-overview" data-tab="overview" class="active" aria-selected="true" aria-controls="tab-overview" tabindex="0" onclick="showTab('overview')">总览</button>
+    <button role="tab" id="tab-btn-play" data-tab="play" aria-selected="false" aria-controls="tab-play" tabindex="-1" onclick="showTab('play')">测试台</button>
+    <button role="tab" id="tab-btn-account" data-tab="account" aria-selected="false" aria-controls="tab-account" tabindex="-1" onclick="showTab('account')">账号</button>
+    <button role="tab" id="tab-btn-skills" data-tab="skills" aria-selected="false" aria-controls="tab-skills" tabindex="-1" onclick="showTab('skills')">技能</button>
+    <button role="tab" id="tab-btn-memory" data-tab="memory" aria-selected="false" aria-controls="tab-memory" tabindex="-1" onclick="showTab('memory')">记忆</button>
+    <button role="tab" id="tab-btn-logs" data-tab="logs" aria-selected="false" aria-controls="tab-logs" tabindex="-1" onclick="showTab('logs')">实时日志</button>
+    <button role="tab" id="tab-btn-teach" data-tab="teach" aria-selected="false" aria-controls="tab-teach" tabindex="-1" onclick="showTab('teach')">原理</button>
+    <button role="tab" id="tab-btn-doctor" data-tab="doctor" aria-selected="false" aria-controls="tab-doctor" tabindex="-1" onclick="showTab('doctor')">系统体检</button>
+    <button role="tab" id="tab-btn-guide" data-tab="guide" aria-selected="false" aria-controls="tab-guide" tabindex="-1" onclick="showTab('guide')">接入指南</button>
+    <button role="tab" id="tab-btn-settings" data-tab="settings" aria-selected="false" aria-controls="tab-settings" tabindex="-1" onclick="showTab('settings')">设置</button>
+    <button role="tab" id="tab-btn-about" data-tab="about" aria-selected="false" aria-controls="tab-about" tabindex="-1" onclick="showTab('about')">关于</button>
   </nav>
 
-  <section id="tab-overview">
+  <section role="tabpanel" aria-labelledby="tab-btn-overview" id="tab-overview" tabindex="0">
     <!-- 立刻开始请求：地址 + Key + 一键复制（回答"导入凭证之后呢？"） -->
     <div class="panel" id="connect-panel">
       <div class="row" style="margin-bottom:10px">
@@ -184,7 +184,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
     <div class="panel" id="recommend-panel" style="display:none"><h2>🎯 今日推荐</h2><div id="recommend-wrap"><div class="empty">加载中…</div></div></div>
   </section>
 
-  <section id="tab-account" style="display:none">
+  <section role="tabpanel" aria-labelledby="tab-btn-account" id="tab-account" tabindex="0" style="display:none">
     <!-- 账号全貌（身份 / 用量 / 套餐 / 积分） -->
     <div class="panel">
       <div class="row" style="margin-bottom:10px">
@@ -282,7 +282,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
     </div>
   </section>
 
-  <section id="tab-skills" style="display:none">
+  <section role="tabpanel" aria-labelledby="tab-btn-skills" id="tab-skills" tabindex="0" style="display:none">
     <div class="panel">
       <h2>技能库 <span style="font-weight:400;color:var(--muted);font-size:12px">（启用后注入对话 system 前缀；roster 模式只注入名称与描述）</span></h2>
       <div class="row" style="margin-bottom:10px">
@@ -305,7 +305,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
     </div>
   </section>
 
-  <section id="tab-memory" style="display:none">
+  <section role="tabpanel" aria-labelledby="tab-btn-memory" id="tab-memory" tabindex="0" style="display:none">
     <div class="panel">
       <h2>记忆库 <span style="font-weight:400;color:var(--muted);font-size:12px">（AI 从这里学习你的偏好与纠正；零 LLM 规则记录，纯本地）</span></h2>
       <div id="mem-toggle-row" style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:#161b22">
@@ -341,7 +341,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
     </div>
   </section>
 
-  <section id="tab-teach" style="display:none">
+  <section role="tabpanel" aria-labelledby="tab-btn-teach" id="tab-teach" tabindex="0" style="display:none">
     <div class="panel">
       <h2>原理速览 <span style="font-weight:400;color:var(--muted);font-size:12px">（这个网关背后发生了什么）</span></h2>
       <details open><summary><b>① 请求进来之后</b></summary>
@@ -384,7 +384,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
     </div>
   </section>
 
-  <section id="tab-logs" style="display:none">
+  <section role="tabpanel" aria-labelledby="tab-btn-logs" id="tab-logs" tabindex="0" style="display:none">
     <div class="panel">
       <div class="row" style="margin-bottom:10px">
         <h2 style="margin:0">实时日志 <span id="log-err-count" class="badge err" style="display:none" title="当前缓冲中 error 级日志数">0</span></h2>
@@ -407,7 +407,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
     </div>
   </section>
 
-  <section id="tab-doctor" style="display:none">
+  <section role="tabpanel" aria-labelledby="tab-btn-doctor" id="tab-doctor" tabindex="0" style="display:none">
     <div class="panel">
       <h2>系统体检 <span style="font-weight:400;color:var(--muted);font-size:12px">（检查结果只是信号，不是判决；"未检查"就是未检查）</span></h2>
       <button class="ghost sm" onclick="refreshDoctor()">重新检查</button>
@@ -415,7 +415,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
     </div>
   </section>
 
-  <section id="tab-guide" style="display:none">
+  <section role="tabpanel" aria-labelledby="tab-btn-guide" id="tab-guide" tabindex="0" style="display:none">
     <div class="panel">
       <h2>把这个网关接入你的 AI 客户端</h2>
       <div style="background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:12px;margin:10px 0 16px;font-size:13px;line-height:2">
@@ -448,7 +448,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
   </section>
 
   <!-- 对话测试台（v0.8 新增 / v0.9：多轮 + 图片 + effort） -->
-  <section id="tab-play" style="display:none">
+  <section role="tabpanel" aria-labelledby="tab-btn-play" id="tab-play" tabindex="0" style="display:none">
     <div class="panel">
       <h2>💬 对话测试台</h2>
       <p style="font-size:13px;color:var(--muted);margin-bottom:10px">不发请求到上游就验证网关链路：选模型（可调思考档位）→ 输入消息（支持粘贴/拖拽图片）→ 流式渲染回复。支持多轮上下文（会话历史留在本页）。</p>
@@ -477,7 +477,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
   </section>
 
   <!-- 设置页（v0.8 新增） -->
-  <section id="tab-settings" style="display:none">
+  <section role="tabpanel" aria-labelledby="tab-btn-settings" id="tab-settings" tabindex="0" style="display:none">
     <div class="panel">
       <h2>⚙️ 设置</h2>
       <p style="font-size:13px;color:var(--muted);margin-bottom:12px">修改后写回 <code>config.json</code>（原子写，不覆盖其他配置）。<b>监听地址与部分项需重启生效</b>。</p>
@@ -496,7 +496,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
   </section>
 
   <!-- 关于页（v0.8 新增） -->
-  <section id="tab-about" style="display:none">
+  <section role="tabpanel" aria-labelledby="tab-btn-about" id="tab-about" tabindex="0" style="display:none">
     <div class="panel">
       <h2>ℹ️ 关于 Freebuff2API</h2>
       <div id="about-wrap"><div class="empty">加载中…</div></div>
@@ -538,7 +538,7 @@ function fmtTime(ts) { try { return new Date(ts).toLocaleTimeString('zh-CN', { h
 
 // ---------- Tab ----------
 function showTab(name) {
-  document.querySelectorAll('nav button').forEach(b => { const on = b.dataset.tab === name; b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); });
+  document.querySelectorAll('nav button').forEach(b => { const on = b.dataset.tab === name; b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); b.setAttribute('tabindex', on ? '0' : '-1'); });
   for (const t of ['overview','play','account','skills','memory','logs','teach','doctor','guide','settings','about']) {
     const el = $('tab-' + t); if (el) el.style.display = (t === name) ? '' : 'none';
   }
@@ -1830,7 +1830,7 @@ async function loadRecommend() {
     };
     w.innerHTML = '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">按上游 rateLimitsByModel 今日剩余次数排序（已暂停/高峰模型自动靠后）</div>' +
       '<div style="overflow-x:auto"><table style="width:100%"><thead><tr><th>模型</th><th>今日剩余</th><th>积分价</th><th>可用性</th></tr></thead><tbody>' +
-      top.map(([m, v]) => `<tr><td>${esc(m)}</td><td><b>${v.usable_today === -1 ? '不限' : (v.usable_today ?? '—')}</b></td><td>${v.price === 0 ? '<b class="tok">免费</b>' : (v.price ?? '—')}</td><td>${availCell(m)}</td></tr>`).join('') +
+      top.map(([m, v]) => `<tr><td>${esc(m)}</td><td><b>${v.usable_today === -1 ? '不限' : esc(String(v.usable_today ?? '—'))}</b></td><td>${v.price === 0 ? '<b class="tok">免费</b>' : esc(String(v.price ?? '—'))}</td><td>${availCell(m)}</td></tr>`).join('') +
       '</tbody></table></div>';
   } catch (e) { $('recommend-panel').style.display = 'none'; }
 }

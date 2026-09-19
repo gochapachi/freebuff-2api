@@ -2,6 +2,25 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.1] - 2026-09-19
+
+### 修复（代码审计闭环：CRITICAL 0 / HIGH 1 / MEDIUM 2 / LOW 6 / NIT 5）
+
+- **[HIGH] 生产接线**：`main.rs` 启动路径加载 vendored 上游模型快照 → `refresh_strategy_from_snapshot`（时间窗/efforts/fallback 策略真正生效；失败静默降级 warn，不阻断启动）
+- **[MEDIUM] availableAt 归因**：仅"不可用由时间窗导致"时给出恢复时刻；静态暂停模型不编造 availableAt
+- **[MEDIUM] 兜底模型校验**：`resolve_at` 兜底 DEFAULT_MODEL 也做可用性校验，全不可用才原样返回默认（让上游给出可读错误）
+- **[LOW] SQLite 鲁棒性**：telemetry `open_db` 设 busy_timeout(5s)；`/api/usage/insights` 改 `spawn_blocking` 不占 tokio worker
+- **[LOW] 未知策略不过度拒绝**：`availability_now` 对未识别策略按可用处理（避免上游新增策略静默禁用模型），文案与"已暂停"区分
+- **[LOW] XSS 面**：推荐表 `price`/`usable_today` 补 `esc()`（上游字段半可信）
+- **[LOW] ARIA 完整性**：11 个面板补 `role=tabpanel`+`aria-labelledby`；tabs 实现 roving tabindex（激活项 0 / 其余 -1）
+- **[LOW] CI E2E 可靠性**：健康轮询超时显式 `::error::`+exit 1；`trap` 兜底清理网关进程
+- **[NIT]** 快照输出确定性排序；空策略覆盖跳过；上传 filename 日志净化（去 CR/LF）；冷却到期文案"已到期"
+
+### 验证
+
+- 275 单测 + core 8 + router 11 + web_pool 5 + model_meta 7 全绿；clippy `-D warnings` 零警告；fmt 通过；check_panel_js 通过
+- 真实 E2E（v0_8 26 + v0_9 26）在 CI e2e-win job 全绿；Release v0.10.1 由 CI 自动构建
+
 ## [0.10.0] - 2026-09-19
 
 ### 新增
