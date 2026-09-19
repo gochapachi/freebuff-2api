@@ -52,7 +52,13 @@ nav button { background:transparent; border:none; color:var(--muted); padding:10
 nav button.active { color:var(--text); border-bottom-color:var(--accent); }
 nav button:hover { color:var(--text); }
 /* 焦点可见环（可访问性） */
-button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline:2px solid #79b8ff; outline-offset:2px; }
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+.seg { display:inline-flex; border:1px solid var(--border); border-radius:var(--r-sm); overflow:hidden; }
+.seg button { background:transparent; color:var(--muted); padding:6px 12px; border-radius:0; font-size:12px; }
+.seg button.active { background:var(--accent-soft); color:var(--text); }
+#cred-warn .banner { border-color:var(--warn); background:linear-gradient(135deg,#3a2c0a,#161b22); }
+#cred-warn .banner a, #cred-warn .banner button { color:var(--warn); }
 .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:14px; margin-bottom:var(--sp-5); }
 .card { background:var(--card); border:1px solid var(--border); border-radius:var(--r-md); padding:14px 16px; box-shadow:var(--sh-card); transition:transform var(--dur-fast) var(--ease-out), border-color var(--dur-fast); }
 .card:hover { transform:translateY(-1px); border-color:#3a4250; }
@@ -108,7 +114,7 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
 @keyframes wizardFlash { 0%,100% { box-shadow:0 0 0 0 rgba(79,140,255,0); } 50% { box-shadow:0 0 0 4px rgba(79,140,255,.5); } }
 .wizard-flash { animation:wizardFlash .8s ease-in-out 2; }
 /* 窄屏导航横向滚动（v0.8 可访问性） */
-@media(max-width:640px){ nav{ flex-wrap:nowrap; overflow-x:auto; } nav button{ flex:none; } }
+@media(max-width:640px){ nav{ flex-wrap:nowrap; overflow-x:auto; } nav button{ flex:none; min-height:44px; } button:not(.sm), input, select, textarea { min-height:44px; } }
 </style>
 </head>
 <body>
@@ -118,21 +124,22 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
   <input id="api-key-input" type="password" placeholder="API Key（配了 api_keys 才需要）" title="配置了 api_keys 时，面板请求需带此 Key；仅存本机浏览器" style="width:200px;font-size:12px" onchange="setApiKey(this.value)">
 </header>
 <main>
+  <div id="cred-warn" role="status" aria-live="polite"></div>
   <div id="banner"></div>
   <div class="cards" id="cards"></div>
   <div id="cost-line" style="font-size:13px;color:var(--muted);margin:-8px 0 16px 2px"></div>
-  <nav>
-    <button data-tab="overview" class="active" onclick="showTab('overview')">总览</button>
-    <button data-tab="play" onclick="showTab('play')">测试台</button>
-    <button data-tab="account" onclick="showTab('account')">账号</button>
-    <button data-tab="skills" onclick="showTab('skills')">技能</button>
-    <button data-tab="memory" onclick="showTab('memory')">记忆</button>
-    <button data-tab="logs" onclick="showTab('logs')">实时日志</button>
-    <button data-tab="teach" onclick="showTab('teach')">原理</button>
-    <button data-tab="doctor" onclick="showTab('doctor')">系统体检</button>
-    <button data-tab="guide" onclick="showTab('guide')">接入指南</button>
-    <button data-tab="settings" onclick="showTab('settings')">设置</button>
-    <button data-tab="about" onclick="showTab('about')">关于</button>
+  <nav role="tablist" aria-label="面板导航">
+    <button role="tab" id="tab-btn-overview" data-tab="overview" class="active" aria-selected="true" aria-controls="tab-overview" onclick="showTab('overview')">总览</button>
+    <button role="tab" id="tab-btn-play" data-tab="play" aria-selected="false" aria-controls="tab-play" onclick="showTab('play')">测试台</button>
+    <button role="tab" id="tab-btn-account" data-tab="account" aria-selected="false" aria-controls="tab-account" onclick="showTab('account')">账号</button>
+    <button role="tab" id="tab-btn-skills" data-tab="skills" aria-selected="false" aria-controls="tab-skills" onclick="showTab('skills')">技能</button>
+    <button role="tab" id="tab-btn-memory" data-tab="memory" aria-selected="false" aria-controls="tab-memory" onclick="showTab('memory')">记忆</button>
+    <button role="tab" id="tab-btn-logs" data-tab="logs" aria-selected="false" aria-controls="tab-logs" onclick="showTab('logs')">实时日志</button>
+    <button role="tab" id="tab-btn-teach" data-tab="teach" aria-selected="false" aria-controls="tab-teach" onclick="showTab('teach')">原理</button>
+    <button role="tab" id="tab-btn-doctor" data-tab="doctor" aria-selected="false" aria-controls="tab-doctor" onclick="showTab('doctor')">系统体检</button>
+    <button role="tab" id="tab-btn-guide" data-tab="guide" aria-selected="false" aria-controls="tab-guide" onclick="showTab('guide')">接入指南</button>
+    <button role="tab" id="tab-btn-settings" data-tab="settings" aria-selected="false" aria-controls="tab-settings" onclick="showTab('settings')">设置</button>
+    <button role="tab" id="tab-btn-about" data-tab="about" aria-selected="false" aria-controls="tab-about" onclick="showTab('about')">关于</button>
   </nav>
 
   <section id="tab-overview">
@@ -380,14 +387,23 @@ details { margin:6px 0; } summary { cursor:pointer; color:var(--muted); font-siz
   <section id="tab-logs" style="display:none">
     <div class="panel">
       <div class="row" style="margin-bottom:10px">
-        <h2 style="margin:0">实时日志</h2>
+        <h2 style="margin:0">实时日志 <span id="log-err-count" class="badge err" style="display:none" title="当前缓冲中 error 级日志数">0</span></h2>
         <span style="flex:1"></span>
-        <select id="log-filter" style="width:auto" onchange="renderLogs()">
+        <span role="status" aria-live="polite" class="sr-only" id="log-sr"></span>
+        <div class="seg" id="log-level-seg" role="group" aria-label="日志级别筛选">
+          <button class="active" data-level="" onclick="setLogLevel(this)">全部</button>
+          <button data-level="info" onclick="setLogLevel(this)">info</button>
+          <button data-level="warn" onclick="setLogLevel(this)">warn</button>
+          <button data-level="error" onclick="setLogLevel(this)">error</button>
+        </div>
+        <select id="log-filter" style="width:auto" onchange="renderLogs()" aria-label="日志级别选择">
           <option value="">全部级别</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option>
         </select>
+        <button class="ghost sm" id="log-pause-btn" onclick="toggleLogPause()">⏸ 暂停滚动</button>
+        <button class="ghost sm" onclick="exportLogs()">⬇ 导出当前</button>
         <button class="ghost sm" onclick="clearLogs()">清空显示</button>
       </div>
-      <div class="logs" id="logbox"><div class="empty">等待日志…（发起一次对话即可看到请求链路）</div></div>
+      <div class="logs" id="logbox" aria-live="polite" aria-relevant="additions"><div class="empty">等待日志…（发起一次对话即可看到请求链路）</div></div>
     </div>
   </section>
 
@@ -522,7 +538,7 @@ function fmtTime(ts) { try { return new Date(ts).toLocaleTimeString('zh-CN', { h
 
 // ---------- Tab ----------
 function showTab(name) {
-  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('nav button').forEach(b => { const on = b.dataset.tab === name; b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); });
   for (const t of ['overview','play','account','skills','memory','logs','teach','doctor','guide','settings','about']) {
     const el = $('tab-' + t); if (el) el.style.display = (t === name) ? '' : 'none';
   }
@@ -538,16 +554,44 @@ function showTab(name) {
   if (name === 'about') loadAbout();
 }
 
+// ---------- 键盘 tab 导航（可访问性） ----------
+function initTabKeyboard() {
+  const nav = document.querySelector('nav[role="tablist"]');
+  if (!nav) return;
+  nav.addEventListener('keydown', (e) => {
+    const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
+    if (!keys.includes(e.key)) return;
+    const tabs = Array.from(nav.querySelectorAll('button[role="tab"]'));
+    const idx = tabs.indexOf(document.activeElement);
+    if (idx < 0) return;
+    e.preventDefault();
+    let ni = idx;
+    if (e.key === 'ArrowLeft') ni = (idx - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'ArrowRight') ni = (idx + 1) % tabs.length;
+    else if (e.key === 'Home') ni = 0;
+    else if (e.key === 'End') ni = tabs.length - 1;
+    const t = tabs[ni];
+    t.focus();
+    showTab(t.dataset.tab);
+  });
+}
+
 // ---------- 对话测试台（v0.8；v0.9：多轮 + 图片 + effort + 复制/导出） ----------
 let playAbort = null;
 let playHistory = [];      // [{role:'user'|'assistant', content}]
 let playImages = [];       // {name, dataUrl}
 const playModelMeta = {};  // id -> /v1/models meta
 
+const PLAY_IMG_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 function playAddFiles(files, fromPaste) {
   for (const f of Array.from(files || [])) {
-    if (!f || !f.type || !f.type.startsWith('image/')) { if (!fromPaste) toast('仅支持图片文件', 3000); continue; }
-    if (f.size > 15 * 1024 * 1024) { toast('图片超过 15MB，已跳过：' + f.name, 3000); continue; }
+    if (!f) continue;
+    if (!f.size) { toast('已拦截空文件：' + (f.name || '未知文件'), 3000); continue; }
+    if (!PLAY_IMG_TYPES.has(String(f.type || '').toLowerCase())) {
+      const msg = '仅支持 JPEG/PNG/GIF/WebP 图片：' + (f.name || '未知文件') + '（' + (f.type || '未知类型') + '）';
+      if (!fromPaste) toast(msg, 3500); continue;
+    }
+    if (f.size > 20 * 1024 * 1024) { toast('图片超过 20MB 上限，已跳过：' + f.name, 3500); continue; }
     const reader = new FileReader();
     reader.onload = () => { playImages.push({ name: f.name || 'paste-' + playImages.length + '.png', dataUrl: String(reader.result) }); renderPlayImages(); };
     reader.readAsDataURL(f);
@@ -603,7 +647,7 @@ async function playSend() {
   if (playAbort) playAbort.abort();
   playAbort = new AbortController();
   const effort = $('play-effort') ? $('play-effort').value : '';
-  const btn = document.querySelector('#tab-play button[onclick="playSend()"]'); if (btn) btn.disabled = true;
+  const btn = document.querySelector('#tab-play button[onclick="playSend()"]'); const btnLabel = btn ? btn.textContent : ''; if (btn) { btn.disabled = true; btn.textContent = playImages.length ? '上传中…' : '发送中…'; }
   $('play-status').textContent = '请求中…';
   const started = Date.now();
   try {
@@ -674,7 +718,7 @@ async function playSend() {
   } catch (e) {
     if (e.name === 'AbortError') { $('play-status').textContent = '已停止'; }
     else { out.innerHTML = renderConversation() + `<div class="lv-error">❌ 请求失败：${esc(e.message)}</div>`; $('play-status').textContent = '失败（' + (Date.now()-started) + 'ms）'; }
-  } finally { if (playAbort) playAbort = null; const btn2 = document.querySelector('#tab-play button[onclick="playSend()"]'); if (btn2) btn2.disabled = false; }
+  } finally { if (playAbort) playAbort = null; const btn2 = document.querySelector('#tab-play button[onclick="playSend()"]'); if (btn2) { btn2.disabled = false; if (btnLabel) btn2.textContent = btnLabel; } }
 }
 function playStop() { if (playAbort) playAbort.abort(); }
 function playNewSession() {
@@ -881,6 +925,19 @@ async function refreshOverview() {
       const cost = await api('/api/usage/cost');
       $('cost-line').innerHTML = `近 ${cost.window_minutes} 分钟：<b>${cost.requests_30m}</b> 请求 · 错误率 <b>${((cost.error_rate_30m || 0) * 100).toFixed(0)}%</b> · 平均延迟 <b>${((cost.avg_latency_ms_30m || 0) / 1000).toFixed(1)}s</b> · 约 <b>${cost.requests_per_hour}</b> 请求/小时 <span style="opacity:.7">（${esc(cost.cost_source || '')}）</span>`;
     } catch (e) { $('cost-line').textContent = ''; }
+    // 凭证冷却警告（v0.10 §2.2）：熔断账号提示 + 一键去账号页
+    const cw = $('cred-warn');
+    if (cw) {
+      try {
+        const h = await api('/api/accounts/health');
+        const cooling = (h.accounts || []).filter(a => a.circuit_state === 'open' || a.circuit_state === 'half_open');
+        if (cooling.length) {
+          const secs = cooling.map(a => parseCooldownSec(a.cooldown_until)).filter(n => n >= 0);
+          const secText = secs.length ? `，最快约 ${Math.round(Math.min(...secs))} 秒后恢复` : '';
+          cw.innerHTML = `<div class="banner"><b>⚠️ ${cooling.length} 个账号冷却中${secText}</b> <span style="font-size:12px;color:var(--muted)">（401/403 或连续失败触发；到期自动恢复）</span> <button class="ghost sm" onclick="showTab('account')">去账号页</button></div>`;
+        } else { cw.innerHTML = ''; }
+      } catch (e5) { cw.innerHTML = ''; }
+    }
     // 无账号引导
     if (accs.length === 0) {
       $('banner').innerHTML = `<div class="banner"><h2>👋 三步开始使用</h2><ol>
@@ -929,6 +986,14 @@ async function refreshOverview() {
       toast('加载失败: ' + m);
     }
   }
+}
+function parseCooldownSec(v) {
+  if (!v) return Infinity;
+  if (typeof v === 'string' && /^\d+s$/.test(v)) return parseInt(v, 10);
+  const t = Date.parse(v);
+  if (!Number.isNaN(t)) return Math.max(0, Math.round((t - Date.now()) / 1000));
+  const n = parseInt(String(v).replace(/[^0-9]/g, ''), 10);
+  return Number.isFinite(n) ? n : Infinity;
 }
 function startOverviewTimer() {
   if (overviewTimer) clearInterval(overviewTimer);
@@ -1634,29 +1699,58 @@ async function initLogs() {
     logSource.onerror = () => { /* 自动重连由浏览器处理 */ };
   } catch (e) { $('logbox').innerHTML = `<div class="empty">日志加载失败：${esc(e.message)}</div>`; }
 }
-function renderLogs() {
+let logPaused = false;
+function visibleLogs() {
   const filter = $('log-filter')?.value || '';
-  logEvents = (logEvents || []).filter(e => !filter || e.level === filter);
-  // 大列表 windowed 渲染（v0.8）：只渲染可视区 + 上下缓冲，>500 条不卡
+  return (logEvents || []).filter(e => !filter || e.level === filter);
+}
+function setLogLevel(btn) {
+  document.querySelectorAll('#log-level-seg button').forEach(b => b.classList.toggle('active', b === btn));
+  const f = $('log-filter'); if (f) f.value = btn.dataset.level || '';
+  renderLogs();
+}
+function toggleLogPause() {
+  logPaused = !logPaused;
+  const b = $('log-pause-btn'); if (b) { b.textContent = logPaused ? '▶ 恢复滚动' : '⏸ 暂停滚动'; b.classList.toggle('active', logPaused); }
+  if (!logPaused) { const box = $('logbox'); if (box && logEvents.length) box.scrollTop = box.scrollHeight; }
+}
+function exportLogs() {
+  const events = visibleLogs();
+  if (!events.length) { toast('当前缓冲为空，无可导出', 2500); return; }
+  const blob = new Blob([JSON.stringify({ exported_at: new Date().toISOString(), count: events.length, logs: events }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'freebuff2api-logs-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json'; a.click();
+  URL.revokeObjectURL(a.href); toast('已导出 ' + events.length + ' 条日志');
+}
+function renderLogs() {
+  const events = visibleLogs();
   const box = $('logbox');
   if (!box) return;
+  // 错误计数徽标 + 无障碍播报（仅数量变化时更新隐藏节点，避免刷屏）
+  const errCount = (logEvents || []).filter(e => e && e.level === 'error').length;
+  const ec = $('log-err-count'); if (ec) { ec.textContent = errCount; ec.style.display = errCount ? '' : 'none'; }
+  const sr = $('log-sr');
+  if (sr && sr.textContent !== '已加载 ' + logEvents.length + ' 条日志，其中错误 ' + errCount + ' 条') {
+    sr.textContent = '已加载 ' + logEvents.length + ' 条日志，其中错误 ' + errCount + ' 条';
+  }
+  // 大列表 windowed 渲染（v0.8）：只渲染可视区 + 上下缓冲，>500 条不卡
   const ROW_H = 22; // 单行日志近似高度（px）
   const BUFFER = 40; // 上下缓冲行数
   const viewport = box.clientHeight || 460;
   const visible = Math.ceil(viewport / ROW_H) + BUFFER * 2;
-  const total = logEvents.length;
+  const total = events.length;
   const topPad = Math.floor(box.scrollTop / ROW_H) || 0;
   const start = Math.max(0, topPad - BUFFER);
   const end = Math.min(total, start + visible);
-  const slice = logEvents.slice(start, end);
+  const slice = events.slice(start, end);
   const html = total === 0
     ? '<div class="empty">暂无日志</div>'
     : `<div style="height:${start * ROW_H}px"></div>` + slice.map(e =>
         `<div class="lv-${esc(e.level)}">[${fmtTime(e.ts)}] ${esc(e.level).toUpperCase()} ${esc(e.kind)}${e.req_id ? ' #' + esc(e.req_id) : ''} — ${esc(e.message)}</div>`
       ).join('') + `<div style="height:${(total - end) * ROW_H}px"></div>`;
   box.innerHTML = html;
-  // 是否跟随底部（自动滚动）：仅当此前贴在底部时保持跟随
-  const stick = box._stick !== false;
+  // 是否跟随底部（自动滚动）：暂停滚动时强制不跟随；否则仅当此前贴在底部时保持
+  const stick = !logPaused && box._stick !== false;
   if (stick && total > 0) box.scrollTop = box.scrollHeight;
 }
 function clearLogs() { logEvents = []; renderLogs(); }
@@ -1665,7 +1759,7 @@ function bindLogScroll() {
   const box = $('logbox'); if (!box || box._scrollBound) return;
   box._scrollBound = true;
   box.addEventListener('scroll', () => {
-    box._stick = (box.scrollTop + box.clientHeight >= box.scrollHeight - 24);
+    box._stick = !logPaused && (box.scrollTop + box.clientHeight >= box.scrollHeight - 24);
     // windowed 渲染生效（总量接近可视区+缓冲）后滚动才需要重渲染；
     // 阈值与 renderLogs 的可见区算法对齐（≈ 底部缓冲区首个非可视行）
     if (logEvents.length > 100) { clearTimeout(box._rt); box._rt = setTimeout(renderLogs, 60); }
@@ -1715,12 +1809,28 @@ async function loadRecommend() {
     const mr = b.model_remaining || {};
     const rows = Object.entries(mr);
     if (!rows.length) { $('recommend-panel').style.display = 'none'; return; }
+    // v0.10：/v1/models meta → availableAt / 未经策略验证 标注（防御性：meta 缺失不渲染该列）
+    let metaById = {};
+    try { const mm = await api('/v1/models'); if (Array.isArray(mm.meta)) mm.meta.forEach(x => { if (x && x.id) metaById[x.id] = x; }); } catch (e6) {}
     rows.sort((x, y) => (x[1].usable_today === -1 ? 0 : 1) - (y[1].usable_today === -1 ? 0 : 1));
     const top = rows.slice(0, 5);
     $('recommend-panel').style.display = '';
-    w.innerHTML = '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">按上游 rateLimitsByModel 今日剩余次数排序（已暂停模型自动靠后）</div>' +
-      '<div style="overflow-x:auto"><table style="width:100%"><thead><tr><th>模型</th><th>今日剩余</th><th>积分价</th></tr></thead><tbody>' +
-      top.map(([m, v]) => `<tr><td>${esc(m)}</td><td><b>${v.usable_today === -1 ? '不限' : (v.usable_today ?? '—')}</b></td><td>${v.price === 0 ? '<b class="tok">免费</b>' : (v.price ?? '—')}</td></tr>`).join('') +
+    const availCell = (m) => {
+      const meta = metaById[m];
+      if (!meta) return '<span class="badge dim" title="上游动态新增/未纳入策略表">未经策略验证</span>';
+      if (meta.available === false) {
+        if (meta.available_at) {
+          let t = '';
+          try { t = new Date(meta.available_at).toLocaleString('zh-CN', { hour12: false }); } catch (e7) {}
+          return '<span class="badge warn" title="' + esc(meta.available_at || '') + '">暂停/高峰，预计 ' + esc(t) + ' 恢复</span>';
+        }
+        return '<span class="badge warn">暂停/下架</span>';
+      }
+      return '<span class="badge ok">可用</span>';
+    };
+    w.innerHTML = '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">按上游 rateLimitsByModel 今日剩余次数排序（已暂停/高峰模型自动靠后）</div>' +
+      '<div style="overflow-x:auto"><table style="width:100%"><thead><tr><th>模型</th><th>今日剩余</th><th>积分价</th><th>可用性</th></tr></thead><tbody>' +
+      top.map(([m, v]) => `<tr><td>${esc(m)}</td><td><b>${v.usable_today === -1 ? '不限' : (v.usable_today ?? '—')}</b></td><td>${v.price === 0 ? '<b class="tok">免费</b>' : (v.price ?? '—')}</td><td>${availCell(m)}</td></tr>`).join('') +
       '</tbody></table></div>';
   } catch (e) { $('recommend-panel').style.display = 'none'; }
 }
@@ -1761,6 +1871,7 @@ async function importConfig(files) {
 }
 
 // ---------- 启动 ----------
+initTabKeyboard();
 refreshOverview();
 loadRecommend();
 loadGuide();
