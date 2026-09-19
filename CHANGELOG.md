@@ -2,6 +2,15 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.3] - 2026-09-19
+
+### 测试/质量
+
+- **覆盖率提升闭环**：新增 22 个 Router 级集成用例（config 读写白名单/非法值、skills list+gate 注入检测、memory CRUD+toggle、tokens import+list、accounts health、usage totals/daily/models/cost/insights、logs recent、doctor、export schema、import 坏 schema、prompts list+toggle、threads cleanup、guide、models data+meta、web-chat 无凭证降级、upload 无凭证 400、usage accounts、account history、跨站写拒绝）
+  - router_test 11 -> **33 用例**；api.rs 行覆盖 30.6% -> **45.8%**；TOTAL 行覆盖 66.8% -> **72.25%**
+- **CI 覆盖率门禁收紧 65% -> 70%**（`--fail-under-lines 70` + `continue-on-error: false`；本机实测 72.25% 留 2.25pt 缓冲）
+- docs/TESTING.md 基线更新；提升路径（api.rs -> 60 再总体 75/80）为 backlog
+
 ## [0.10.2] - 2026-09-19
 
 ### 新增

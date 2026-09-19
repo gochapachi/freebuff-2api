@@ -36,11 +36,12 @@ node tests/e2e_phase_v0_9.cjs 47980 config.e2e.json
 
 ## 四、覆盖率（v0.10.2 基线，2026-09-19 本机实测）
 
-- 工具：`cargo-llvm-cov 0.9.1`（`cargo install cargo-llvm-cov --locked`；需 `rustup component add llvm-tools-preview`），跑：`cargo llvm-cov --fail-under-lines 65`
-- **TOTAL 行覆盖率 66.8%**；**CI 已收紧为真门禁**：`--fail-under-lines 65` + `continue-on-error: false`（留 1.8pt 环境缓冲）
-- 关键业务模块 ≥80%：models 83.2 / telemetry 94.4 / router 89.0 / web_pool 84.6 / errors 97.9 / retry 94.1 / redact 98.5 / import 92.8 / mcp 98.6 / memory 93.9 / export 84.0 / account_meta 81.6
-- 拉低总体：api.rs 30.6（HTTP 单体，靠集成/E2E 覆盖）、main.rs 0（启动路径）、upstream 51.6 / session 65.6 / web_protocol 78.5（网络层，需 Mock 上游）
-- **提升路径（backlog）**：补 api.rs 集成测试（Mock 上游扩 case）→ 70% → 75% → 80%
+- 工具：`cargo-llvm-cov 0.9.1`（`cargo install cargo-llvm-cov --locked`；需 `rustup component add llvm-tools-preview`），跑：`cargo llvm-cov --fail-under-lines 70`
+- **TOTAL 行覆盖率 72.25%（v0.10.3）**；**CI 真门禁**：`--fail-under-lines 70` + `continue-on-error: false`
+- 本轮新增 22 个 Router 级用例后：**api.rs 30.6% -> 45.8%**；router_test 11 -> **33** 用例
+- 关键业务模块：errors 97.9 / redact 98.5 / mcp 98.6 / telemetry 94.4 / memory 93.9 / import 92.8 / router 89.0 / web_pool 84.6 / export 84.0 / models 83.2
+- 拉低总体：main.rs 0（启动路径）、upstream 51.6 / session 65.6 / web_protocol 76.9（网络层，需 Mock 上游）
+- **提升路径（backlog）**：api.rs 45.8 -> 60（鉴权/路由错误分支）→ 总体 75% → 80%
 
 ## 五、环境限制（诚实披露）
 
