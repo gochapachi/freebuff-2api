@@ -2,6 +2,18 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.2] - 2026-09-19
+
+### 新增
+
+- Dockerfile 容器健康检查：运行阶段安装 `curl` + `HEALTHCHECK`（`/healthz`，interval 30s / start_period 10s）
+- CI 覆盖率**真门禁**：`--fail-under-lines 65` + `continue-on-error: false`（替代原 always-true；本机基线 66.8%，关键模块 ≥80%）
+- `docs/DOCKER.md` 容器实跑指南（本机无 Docker 时由 CI docker.yml 多架构构建 → ghcr.io/lza6/freebuff2api）
+
+### 工程
+
+- 覆盖率基线记录于 `docs/TESTING.md`（TOTAL 66.8%；提升路径 70→75→80 为 backlog）
+
 ## [0.10.1] - 2026-09-19
 
 ### 修复（代码审计闭环：CRITICAL 0 / HIGH 1 / MEDIUM 2 / LOW 6 / NIT 5）
