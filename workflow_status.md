@@ -1,7 +1,22 @@
 # Workflow Status — Freebuff2API
 
 > 单一状态源（长期任务恢复 / 节点协作 / 最终验收）。只记录事实与证据。
-> Phase G/H/I/J 已发布；当前跟踪 **Phase K（v0.8.0，核心链路加固 + 信号量落地 + 面板现代化 + 安全加固）**。
+
+## Phase M（v0.10.0，2026-09-19 执行中）
+
+- **来源**：`计划书/下一步改进指南.md`（v0.9.0 → v0.10.x）
+- **范围**：上游模型策略合同实时化（availability 时间窗/availableAt/快照同步 + mimo 收录 + 5 项上游漂移修正）/ 面板可访问性与体验（ARIA/键盘/44px/日志增强/推荐可用性列/凭证冷却提醒/上传校验）/ 遥测"三最"聚合端点 / web 凭证池全冷却结构化降级 / 请求热路径 unwrap 收窄 / CI（E2E job + --doc + 覆盖率纪律）/ 文档清账与发布 v0.10.0
+- **状态**：✅ 代码与本地验证完成（2026-09-19 实测）
+- **证据**：
+  - 单元/集成：275 单测 + core 8 + router 11 + web_pool 5 + model_meta 7 全绿；clippy `-D warnings` 零警告；`cargo fmt --check` 通过
+  - 真实 E2E：`e2e_phase_v0_8` 26/26、`e2e_phase_v0_9` 26/26（预置假 web-cookie 触发合并路径）全绿
+  - 新端点冒烟：`/v1/models` meta 含 availability/available_at（mimo/mimo-v2.5 已收录）；`/api/accounts/health` web-cookie 条目 + cooldown_seconds；`/api/usage/insights` 契约完整（window_hours=24）；`/ui` 含 role="tablist"/aria-live/min-height:44px
+  - 模型合同：`scripts/check_model_contract.mjs` 通过（fixture catalog=18 / models.rs meta=20 全对齐）；vendored 快照应用零漂移
+  - 代码审计：code-reviewer 复审（结论见下）
+
+## 历史阶段
+
+> Phase G/H/I/J/K/L 已发布；K=v0.8.0、L=v0.9.0。
 
 ## Phase L（v0.9.0，2026-09-18 完成）
 

@@ -2,6 +2,34 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.0] - 2026-09-19
+
+### 新增
+
+- **上游模型策略合同实时化**（`src/models.rs` / `src/router.rs`，对照上游 freebuff-models.ts 快照）：
+  - `ModelMeta` 新增 `availability`（always/deployment_hours/off_peak_only）+ `available_at`（off_peak_only 窗口内给出 ISO 恢复时刻，与上游 freebuffModelUnavailableAt 对齐，不编造时间）
+  - DeepSeek 高价窗 00:00–10:00 UTC（北京周末豁免）；`refresh_strategy_from_snapshot` 快照同步（幂等、失败降级静态底座）
+  - `resolve/resolve_available/unavailable_reason` 时间感知，降级链跳过暂停/高峰模型
+  - 目录对齐：收录 `mimo/mimo-v2.5`（上游免费无限、FALLBACK 落点）；按上游快照修正 5 处漂移（deepseek-v4-flash premium、kimi premium、ox-alpha premium/multimodal、fable multimodal、glm-5.2 multimodal）
+  - 新增 `tests/fixtures/freebuff-models.snapshot.json`（21 行）+ `scripts/check_model_contract.mjs` + `scripts/extract_upstream_models.mjs` 漂移检测
+- **面板可访问性与体验**（`src/web.rs`）：ARIA tabs（role=tablist/aria-selected/键盘 ←/→/Home/End）、日志 aria-live、focus-visible、44px 触控目标；日志页级别筛选按钮组/暂停滚动/导出 JSON/错误计数徽标；推荐卡可用性列（暂停/高峰 + availableAt + 未经策略验证）；凭证冷却警告条（一键去账号页）；上传白名单/20MB/空文件校验 + 发送中/上传中按钮态
+- **遥测"三最"聚合**：`src/telemetry.rs::insights()` + `/api/usage/insights`（最慢账号 Top3/最常用模型 Top5/错误率最高时段 Top3）
+- **web 凭证池全冷却结构化降级**：`web_pool_exhausted`（503 + code=web_pool_exhausted + 最短恢复秒）；`cooldown_until` 输出 ISO + 新增 `cooldown_seconds`
+- **请求热路径 panic 收窄**：api.rs 7 处运行时 unwrap → unwrap_or_default
+- **CI/工程**：新增 `e2e-win` job（真实网关 E2E + 面板 JS 检查）、`cargo test --doc` 门禁（rust-docs 组件）、覆盖率纪律注释；`docs/TESTING.md`、`scripts/verify_release.ps1`、`scripts/check_artifacts.ps1`（只报告不删）
+
+### 测试
+
+- 单测 253 → **275**（models 时间窗/同步器/路由时间感知 + telemetry insights + router 3 项时间路由）
+- model_meta_test 4 → **7**（mimo 目录/meta 全盖/fixture 零漂移）；router_test 11、web_pool_test 5、core_test 8 保持
+- `cargo clippy --all-targets -- -D warnings` 零警告；`cargo fmt --check` 通过
+
+### 文档
+
+- `docs/API_GUIDE.md` 补 /api/usage/insights、/api/accounts/health、/api/export、/api/import、/api/login/embed/result、/v1/models meta
+- `README_zh.md` 模型矩阵补 mimo/glm-5.2；v0.10 特性说明；`计划书/0-项目全景与版本路线图.md` 刷新至 v0.10
+- `workflow_status.md` 开 Phase M
+
 ## [0.9.0] - 2026-09-18
 
 ### 新增

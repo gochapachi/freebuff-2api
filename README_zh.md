@@ -42,6 +42,8 @@ cargo build --release
 > 凭证按值**自动去重**，列表里能看到**账号昵称/邮箱、套餐、今日剩余积分、入库时间**，每行可「检查 / 详情 / 删除」。
 > 多账号可重复添加，网关自动轮询、健康评分、失败冷却（Bearer 账号池全量轮询；v0.9 起 web Cookie 凭证同样池化：健康分/熔断/冷却/轮询，401/403 自动冷却换号）。
 
+> v0.10：上游模型策略实时化（availability 时间窗 + availableAt + 快照同步）、面板可访问性（ARIA/键盘/44px 触控）、"三最"观测（/api/usage/insights）、web 凭证池全冷却结构化降级（web_pool_exhausted）。
+
 ### 第 3 步：接入你的客户端
 
 网关默认监听 `http://127.0.0.1:47821`。**面板「总览」页顶部「🚀 立刻开始请求」卡片直接给出地址与 Key，可一键复制**；下面是等价的手抄版：
@@ -155,7 +157,9 @@ print(resp.choices[0].message.content)
 | `deepseek/*`、`z-ai/glm`、`stealth/ox-alpha` | `low, high, max` |
 | `openai/gpt-5.6*`、`gemini-3.8`、`claude-fable-5` | `low, medium, high, xhigh, max` |
 | `meta/muse-spark*` | `minimal, low, medium, high, xhigh` |
-| `solar-pro4`、`minimax-m3`、`mimo-v2.5`、`kimi-k3` | 不支持（自动剥离） |
+| `solar-pro4`、`minimax-m3`、`mimo-v2.5`、`kimi-k3`、`glm-5.2` | 不支持（自动剥离） |
+
+> v0.10 起 `mimo/mimo-v2.5` 已收录进模型目录（上游免费无限额度模型、上游 FALLBACK 落点，无 reasoning_effort 阶梯）。
 
 ---
 

@@ -24,7 +24,7 @@ jobs:
           # 锁定与本地验证一致的版本，避免最新 stable 的 clippy 新 lint 触发 -D warnings
           toolchain: 1.95.0
           targets: x86_64-pc-windows-msvc
-          components: clippy, rustfmt
+          components: clippy, rustfmt, rust-docs
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -49,15 +49,19 @@ jobs:
         run: |
           set +e
           cargo test 2>&1 | tee /tmp/test.log; TEST_RC=${PIPESTATUS[0]}
+          cargo test --doc 2>&1 | tee /tmp/doc.log; DOC_RC=${PIPESTATUS[0]}
           cargo clippy --all-targets -- -D warnings 2>&1 | tee /tmp/clippy.log; CLIPPY_RC=${PIPESTATUS[0]}
-          echo "test rc=$TEST_RC clippy rc=$CLIPPY_RC"
+          echo "test rc=$TEST_RC doc rc=$DOC_RC clippy rc=$CLIPPY_RC"
           if [ "$TEST_RC" -ne 0 ]; then
             echo "::error title=cargo-test-failed::$(tail -n 40 /tmp/test.log | tr '\n' '|' | cut -c1-6000)"
+          fi
+          if [ "$DOC_RC" -ne 0 ]; then
+            echo "::error title=cargo-doc-test-failed::$(tail -n 40 /tmp/doc.log | tr '\n' '|' | cut -c1-6000)"
           fi
           if [ "$CLIPPY_RC" -ne 0 ]; then
             echo "::error title=cargo-clippy-failed::$(grep -E '^error|^warning|-->' /tmp/clippy.log | head -30 | tr '\n' '|' | cut -c1-6000)"
           fi
-          if [ "$TEST_RC" -ne 0 ] || [ "$CLIPPY_RC" -ne 0 ]; then exit 1; fi
+          if [ "$TEST_RC" -ne 0 ] || [ "$DOC_RC" -ne 0 ] || [ "$CLIPPY_RC" -ne 0 ]; then exit 1; fi
 
       - name: Format check
         shell: bash
@@ -113,6 +117,81 @@ jobs:
           files: desktop/dist/*.exe
           generate_release_notes: true
 
+  e2e-win:
+    runs-on: windows-latest
+    needs: build-win
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('Cargo.lock') }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build gateway (release)
+        run: cargo build --release
+        env:
+          CARGO_HTTP_PROXY: ""
+
+      - name: Run panel JS syntax check
+        shell: bash
+        run: node tests/check_panel_js.cjs
+
+      - name: Boot gateway + run E2E smoke
+        shell: bash
+        env:
+          CARGO_HTTP_PROXY: ""
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          ALL_PROXY: ""
+        run: |
+          set -e
+          node -e "
+            const fs = require('fs');
+            fs.writeFileSync('config.e2e.json', JSON.stringify({
+              listen_addr: '127.0.0.1:47980',
+              upstream_base_url: 'https://www.codebuff.com',
+              auth_tokens: [],
+              api_keys: [],
+              skip_upstream_check: true,
+              memory_enabled: false,
+              sqlite_path: 'data-e2e/freebuff2api.sqlite',
+              telemetry_path: 'data-e2e/telemetry.sqlite',
+              memory_path: 'data-e2e/memory.sqlite',
+              skills_dir: 'data-e2e/skills',
+              redact_logs: true,
+              token_saver: false
+            }, null, 2));
+          "
+          mkdir -p data-e2e
+          ./target/release/freebuff2api.exe --config config.e2e.json &
+          GW_PID=$!
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:47980/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          # 预置假 web-cookie（仅本地池，触发 health 合并路径；无上游网络调用）
+          curl -s -X POST http://127.0.0.1:47980/api/tokens/import -H "content-type: application/json" -d "{\"cookie\":\"__Secure-next-auth.session-token=e2e-fake-abc; __Host-next-auth.csrf-token=e2e\"}" >/dev/null
+          node tests/e2e_phase_v0_8.cjs 47980 config.e2e.json
+          node tests/e2e_phase_v0_9.cjs 47980 config.e2e.json
+          kill $GW_PID 2>/dev/null || true
+
   coverage:
     runs-on: windows-latest
     steps:
@@ -133,7 +212,7 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
       - name: Coverage gate (>=80% lines)
-        # 首次放行收集基线（本机未装 llvm-cov）；拿到基线后移除 continue-on-error 收紧
+        # v0.10：本机已装 cargo-llvm-cov 记录基线（目标 >=80 行覆盖率）；达标后移除 continue-on-error 收紧（见 计划书/下一步改进指南.md §3.1）
         continue-on-error: true
         env:
           CARGO_HTTP_PROXY: ""

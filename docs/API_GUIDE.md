@@ -58,7 +58,7 @@ docker run -d -p 47821:47821 -v /data:/data freebuff2api
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/v1/chat/completions` | POST | 聊天（流式/非流式），自动多账号轮询 |
-| `/v1/models` | GET | 可用模型列表 |
+| `/v1/models` | GET | 可用模型列表（`data` 兼容；顶层 `meta` 数组含 id/agent/premium/multimodal/available/efforts/fallback/availability/available_at） |
 | `/v1/messages` | POST | Anthropic 协议聊天（流式为标准 Anthropic 事件流） |
 | `/v1/web/chat` | POST | web 协议对话（Cookie 鉴权；`images` 支持多模态） |
 | `/v1/uploads` | POST | 上传文件换 storageId（裸 body + `x-file-name` 头，上限 20MB） |
@@ -72,6 +72,7 @@ docker run -d -p 47821:47821 -v /data:/data freebuff2api
 | `/api/tokens/delete` | POST | 删除凭证 `{id}`（同时移出运行中的账号池） |
 | `/api/account/overview` | GET | 账号全貌（身份/用量统计/套餐/额度积分），聚合上游 4 个端点 |
 | `/api/account/history` | GET | 账号使用记录（每次检查/刷新一条快照）`?cred_id=&limit=` |
+| `/api/accounts/health` | GET | 凭证健康看板（Bearer + web Cookie 合并：health_score/circuit_state/cooldown_until(ISO)/cooldown_seconds/trips/last_error + 历史时间线） |
 | `/api/account/balance` | GET | 账号积分/每模型剩余次数/套餐/地区限制 |
 | `/api/account/detail` | POST | 账号详情卡片（余额+用量+用户+套餐） |
 | `/api/account/refresh` | POST | 凭证保活检查（调上游 convex-token 验证 Cookie 是否有效） |
@@ -87,6 +88,9 @@ docker run -d -p 47821:47821 -v /data:/data freebuff2api
 |------|------|------|
 | `/api/config/api-key` | POST | 运行时管理下游 API Key：`{"action":"generate"\|"set"\|"clear","key"?}`；**立即生效**并写回 `config.json`（非本机监听时禁止清空） |
 | `/api/config` | GET | 返回设置页可编辑配置项（脱敏；含信号量容量/脱敏开关/记忆等） |
+| `/api/export` | POST | 全配置导出（脱敏 config + 凭证 + 技能启用态 + 记忆开关；schema_version=1） |
+| `/api/import` | POST | 全配置导入（schema 校验、<=5MB、写前自动备份 `data/backup-<ts>/`、绝不覆盖 api_keys/auth_tokens） |
+| `/api/login/embed`、`/api/login/result` | POST/GET | 内嵌 WebView2 一键登录（桌面版） |
 | `/api/config` | POST | 保存单个配置项 `{"key":"listen_addr","value":"..."}`：白名单校验 + 类型/合法值检查 + 原子写回 `config.json`；`memory_enabled` 立即热生效，其余重启生效 |
 
 ### 技能（Skills）
@@ -129,6 +133,7 @@ docker run -d -p 47821:47821 -v /data:/data freebuff2api
 | `/api/usage/daily` | GET | 按日/模型统计 |
 | `/api/usage/requests` | GET | 最近请求明细 |
 | `/api/usage/models` | GET | 模型列表（代理注册表） |
+| `/api/usage/insights` | GET | v0.10 三最聚合：最慢账号 Top3 / 最常用模型 Top5 / 错误率最高时段 Top3（本地 SQLite） |
 | `/api/usage/accounts` | GET | 账号健康度 |
 
 ### 面板与健康
