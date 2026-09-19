@@ -58,6 +58,18 @@ async fn main() -> anyhow::Result<()> {
     if let Ok((added, removed)) = registry.refresh_from_upstream(&client_http()).await {
         tracing::info!("模型注册表同步：新增 {added} 个，移除 {removed} 个");
     }
+    // v0.10 H1 修复：生产路径加载 vendored 上游模型快照 → 策略覆盖（availability 时间窗/efforts/fallback）。
+    // 失败静默降级到静态底座并 warn，绝不阻断启动（与计划书 §1.1 一致）。
+    if let Some(snap) = freebuff2api::models::load_local_snapshot() {
+        match registry.refresh_strategy_from_snapshot(&snap) {
+            Ok((added, updated)) => {
+                tracing::info!("模型策略快照同步：新增策略 {added}，更新 {updated}");
+            }
+            Err(e) => {
+                tracing::warn!("模型策略快照同步失败，使用静态底座: {e}");
+            }
+        }
+    }
     let router = Arc::new(ModelRouter::new(
         registry.clone(),
         RouterConfig::from_app_config(&cfg),

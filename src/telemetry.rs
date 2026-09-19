@@ -205,6 +205,8 @@ fn open_db(path: &Path) -> Result<Connection> {
     }
     let conn =
         Connection::open(path).with_context(|| format!("打开遥测库失败: {}", path.display()))?;
+    // 审计 L1：设 busy_timeout，避免与后台写线程瞬时争锁时 SQLITE_BUSY
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     // journal_mode 会返回一行结果，必须用 query_row 读取
     let _mode: String = conn
         .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))

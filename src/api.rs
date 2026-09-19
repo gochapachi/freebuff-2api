@@ -4609,9 +4609,12 @@ async fn handle_usage_insights(State(st): State<AppState>, headers: HeaderMap) -
     if !admin_authorized(&headers, &st) {
         return admin_denied();
     }
-    match crate::telemetry::insights(&st.cfg.telemetry_path, 24) {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => internal_err(&e),
+    // 审计 L1：SQLite 聚合放阻塞池，避免占用 tokio worker；busy_timeout 已在 open_db 设置
+    let db = st.cfg.telemetry_path.clone();
+    match tokio::task::spawn_blocking(move || crate::telemetry::insights(&db, 24)).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => internal_err(&e),
+        Err(e) => internal_err(&anyhow::anyhow!("insights 任务失败: {e}")),
     }
 }
 
@@ -5495,7 +5498,7 @@ async fn handle_upload(
                 None,
                 format!(
                     "上传 {}（{:.1}KB, {}）→ storageId {}",
-                    filename,
+                    filename.replace(['\r', '\n'], ""),
                     body.len() as f64 / 1024.0,
                     up.kind,
                     up.storage_id
@@ -5556,8 +5559,9 @@ async fn web_pool_exhausted(st: &AppState) -> Response {
         Json(serde_json::json!({
             "error": {
                 "message": format!(
-                    "所有 web Cookie 账号均不可用（池内 {} 个，冷却中 {} 个；最短约 {} 秒后恢复）。请到面板「账号」页检查或重新登录。",
-                    snap.len(), cooling.len(), min_sec
+                    "{}{}。请到面板「账号」页检查或重新登录。",
+                    format!("所有 web Cookie 账号均不可用（池内 {} 个，冷却中 {} 个）", snap.len(), cooling.len()),
+                    if min_sec > 0 { format!("；最短约 {min_sec} 秒后恢复") } else { String::from("；冷却已到期") }
                 ),
                 "type": "pool_exhausted",
                 "code": "web_pool_exhausted",

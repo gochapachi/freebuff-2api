@@ -68,6 +68,18 @@ impl ModelRouter {
                 return m.clone();
             }
         }
+        // 审计 M2：兜底默认模型也须当时可用；不可用则取降级链第一个当时可用；全不可用才原样返回默认（让上游给可读错误）
+        if self
+            .registry
+            .model_available_at(crate::models::DEFAULT_MODEL, now)
+        {
+            return crate::models::DEFAULT_MODEL.to_string();
+        }
+        for m in &self.config.fallback_chain {
+            if self.registry.has_model(m).await && self.registry.model_available_at(m, now) {
+                return m.clone();
+            }
+        }
         crate::models::DEFAULT_MODEL.to_string()
     }
 

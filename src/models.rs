@@ -368,7 +368,8 @@ pub fn availability_now(availability: &str, now: DateTime<Utc>) -> bool {
         "always" => true,
         "off_peak_only" => !is_deepseek_expensive_window(now),
         "deployment_hours" => true,
-        _ => false,
+        // 审计 L2：未知策略不过度拒绝（按 always 处理），避免上游新增策略值导致模型被静默禁用
+        _ => true,
     }
 }
 
@@ -476,7 +477,8 @@ fn merge_into_meta(
     let static_available = s.map(|r| r.available).unwrap_or(true);
     let window_ok = availability_now(&availability, now);
     let available = static_available && window_ok;
-    let available_at = if !available && availability == "off_peak_only" {
+    // 审计 M1：仅当"不可用由时间窗导致"（非静态暂停）时才给 availableAt，暂停模型不编造恢复时刻
+    let available_at = if static_available && !window_ok && availability == "off_peak_only" {
         Some(deepseek_expensive_window_ends_at(now).to_rfc3339())
     } else {
         None
@@ -641,13 +643,17 @@ impl ModelRegistry {
                 out.push(m);
             }
         }
+        let mut extra: Vec<ModelMeta> = Vec::new();
         for (id, o) in &over {
             if !MODEL_META_ROWS.iter().any(|r| r.id == id) {
                 if let Some(m) = merge_into_meta(id, None, Some(o), now) {
-                    out.push(m);
+                    extra.push(m);
                 }
             }
         }
+        // 审计 NIT1：表外行按 id 排序，输出确定性
+        extra.sort_by(|a, b| a.id.cmp(&b.id));
+        out.extend(extra);
         out
     }
 
@@ -715,9 +721,18 @@ impl ModelRegistry {
                 continue;
             }
             let static_row = MODEL_META_ROWS.iter().find(|r| r.id == row.id);
+            let patch = override_from_snapshot(row);
+            // 审计 NIT3：无任何策略字段的行不写入覆盖（避免"空覆盖也算已知"）
+            if patch.availability.is_none()
+                && patch.premium.is_none()
+                && patch.multimodal.is_none()
+                && patch.efforts.is_none()
+                && patch.fallback.is_none()
+            {
+                continue;
+            }
             let prev_override = guard.get(&row.id).cloned();
             let prev = merge_into_meta(&row.id, static_row, prev_override.as_ref(), now);
-            let patch = override_from_snapshot(row);
             let merged = match &prev_override {
                 Some(b) => merge_override(b, &patch),
                 None => patch,
@@ -920,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn availability_deployment_hours_true_unknown_false() {
+    fn availability_deployment_hours_true_unknown_lenient() {
         let t = DateTime::parse_from_rfc3339("2026-09-16T03:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -928,7 +943,10 @@ mod tests {
             availability_now("deployment_hours", t),
             "deployment_hours 不据此拒绝"
         );
-        assert!(!availability_now("mystery_policy", t), "未知策略保守拒绝");
+        assert!(
+            availability_now("mystery_policy", t),
+            "未知策略按可用处理（不过度拒绝）"
+        );
     }
 
     #[test]
