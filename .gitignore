@@ -40,3 +40,6 @@ config2.json
 
 # E2E 运行时生成的隔离配置（可能临时含生成的 api key，绝不入库）
 tests/e2e_phase_g.config.json
+
+# 旧产物归档（不入库）
+_archive_旧产物/

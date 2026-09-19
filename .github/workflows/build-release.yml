@@ -214,12 +214,15 @@ jobs:
           key: ${{ runner.os }}-cov-${{ hashFiles('Cargo.lock') }}
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
-      - name: Coverage gate (>=80% lines)
-        # v0.10：本机已装 cargo-llvm-cov 记录基线（目标 >=80 行覆盖率）；达标后移除 continue-on-error 收紧（见 计划书/下一步改进指南.md §3.1）
-        continue-on-error: true
+      - name: Coverage gate (>=65% lines, v0.10.2 真门禁)
+        # v0.10.2：本机基线实测 TOTAL 行覆盖率 66.8%（cargo-llvm-cov 0.9.1，2026-09-19）。
+        # 关键业务模块已 >=80%：models 83.2 / telemetry 94.4 / router 89.0 / web_pool 84.6 / errors 97.9 / retry 94.1 / redact 98.5 / import 92.8 / mcp 98.6 / memory 93.9 / export 84.0 / account_meta 81.6。
+        # 拉低总体：api.rs 30.6（HTTP 单体，靠集成/E2E）、main.rs 0（启动路径）、upstream 51.6 / session 65.6 / web_protocol 78.5（网络层）。
+        # 门禁从"永不失败"收紧为 65%（留 1.8pt 环境缓冲）；提升路径：补 api.rs 集成测试 → 70% → 75% → 80%。
+        continue-on-error: false
         env:
           CARGO_HTTP_PROXY: ""
           HTTP_PROXY: ""
           HTTPS_PROXY: ""
           ALL_PROXY: ""
-        run: cargo llvm-cov --fail-under-lines 80
+        run: cargo llvm-cov --fail-under-lines 65

@@ -11,7 +11,9 @@ COPY src/ src/
 RUN cargo build --release
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+# v0.10.2：容器健康检查（gateway /healthz）
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl -sf http://127.0.0.1:47821/healthz >/dev/null || exit 1
 COPY --from=builder /build/target/release/freebuff2api /usr/local/bin/freebuff2api
 ENV PORT=47821
 VOLUME ["/data"]
