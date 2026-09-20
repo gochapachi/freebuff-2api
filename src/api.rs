@@ -2920,8 +2920,13 @@ async fn handle_chat_completions(
                     .mark_failure(&account_name, &format!("session: {msg}"))
                     .await;
                 st.pool.update_score(&account_name, -30.0).await;
-                last_status = 502;
-                last_error = format!("failed to acquire free session: {msg}");
+                if msg.contains("429") || msg.contains("rate_limited") || msg.contains("freebucksShortfall") {
+                    last_status = 429;
+                    last_error = "Upstream Codebuff daily Freebucks quota (25 requests) is exhausted for this account (0/25). Quota replenishes at 07:00 UTC (12:30 PM IST). Please add another account in the Freebuff dashboard (https://freebuff.anagataitsolutions.in) to resume immediately, or use Gemini 3.8 via https://gemini.anagataitsolutions.in/v1.".to_string();
+                } else {
+                    last_status = 502;
+                    last_error = format!("failed to acquire free session: {msg}");
+                }
                 continue;
             }
         };
@@ -3718,8 +3723,13 @@ async fn handle_claude_messages(
                     .mark_failure(&account.name, &format!("session: {msg}"))
                     .await;
                 st.pool.update_score(&account.name, -30.0).await;
-                claude_last_status = 502;
-                claude_last_error = format!("failed to acquire free session: {msg}");
+                if msg.contains("429") || msg.contains("rate_limited") || msg.contains("freebucksShortfall") {
+                    claude_last_status = 429;
+                    claude_last_error = "Upstream Codebuff daily Freebucks quota (25 requests) is exhausted for this account (0/25). Quota replenishes at 07:00 UTC (12:30 PM IST). Please add another account in the Freebuff dashboard (https://freebuff.anagataitsolutions.in) to resume immediately.".to_string();
+                } else {
+                    claude_last_status = 502;
+                    claude_last_error = format!("failed to acquire free session: {msg}");
+                }
                 continue;
             }
         };
