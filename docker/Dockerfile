@@ -7,6 +7,8 @@ RUN mkdir -p src && echo 'fn main(){}' > src/main.rs && echo '' > src/lib.rs && 
     cargo build --release 2>/dev/null || true
 
 COPY src/ src/
+COPY browser-extension/ browser-extension/
+COPY tests/ tests/
 # 必须 touch 触发全量真实源码编译，避免 BuildKit 缓存导致空 main() 骨架被打包
 RUN touch src/main.rs src/lib.rs && cargo build --release
 
