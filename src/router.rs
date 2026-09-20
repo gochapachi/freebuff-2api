@@ -63,6 +63,15 @@ impl ModelRouter {
         {
             return requested.to_string();
         }
+        // 如果 requested 没有 provider 前缀（例如 "glm-5.3-flash" 或 "gemini-3.8-flash"），尝试匹配对应完整模型名
+        let all = self.registry.models().await;
+        if let Some(matched) = all.iter().find(|m| {
+            m.ends_with(&format!("/{requested}")) || m.split('/').last() == Some(requested)
+        }) {
+            if self.registry.model_available_at(matched, now) {
+                return matched.clone();
+            }
+        }
         for m in &self.config.fallback_chain {
             if self.registry.has_model(m).await && self.registry.model_available_at(m, now) {
                 return m.clone();

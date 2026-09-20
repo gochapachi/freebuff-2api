@@ -2837,9 +2837,41 @@ async fn handle_chat_completions(
             Some(a) => a,
             None => {
                 if attempt == 0 {
+                    let accounts = st.pool.accounts.lock().await;
+                    if accounts.is_empty() {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(serde_json::json!({
+                                "error": {
+                                    "message": "No upstream Freebuff accounts configured. Please add an account token or Web Cookie via the dashboard (https://freebuff.anagataitsolutions.in).",
+                                    "type": "authentication_error",
+                                    "code": "no_accounts_configured"
+                                }
+                            })),
+                        )
+                            .into_response();
+                    }
+                    let mut reasons = Vec::new();
+                    for acc in accounts.iter() {
+                        let br = acc.breaker.read().await;
+                        if let Some(r) = &br.last_reason {
+                            reasons.push(r.clone());
+                        }
+                    }
+                    let reason_text = if !reasons.is_empty() {
+                        reasons.join("; ")
+                    } else {
+                        "accounts cooling down".to_string()
+                    };
                     return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({ "error": { "message": "no healthy upstream auth token available", "type": "server_error" } })),
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(serde_json::json!({
+                            "error": {
+                                "message": format!("Upstream Freebuff quota exhausted or cooling down ({reason_text}). Daily Freebucks quota (25 requests) replenishes at 07:00 UTC (12:30 PM IST). You can add another account in the dashboard (https://freebuff.anagataitsolutions.in) to resume immediately."),
+                                "type": "insufficient_quota",
+                                "code": "rate_limited"
+                            }
+                        })),
                     )
                         .into_response();
                 }
@@ -3632,8 +3664,8 @@ async fn handle_claude_messages(
             None => {
                 if attempt == 0 {
                     return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({ "type": "error", "error": { "type": "api_error", "message": "no healthy token" } })),
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(serde_json::json!({ "type": "error", "error": { "type": "rate_limit_error", "message": "Upstream Freebuff accounts currently cooling down. Daily Freebucks quota (25 requests) replenishes at 07:00 UTC (12:30 PM IST). You can add another account in the dashboard (https://freebuff.anagataitsolutions.in) to resume immediately." } })),
                     )
                         .into_response();
                 }
